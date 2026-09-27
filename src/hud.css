@@ -1,0 +1,726 @@
+/* 画面下の操作パネル (hud.ts)
+ * すりガラスの上に、細い線と小さな文字だけで組む。和の要素は控えめに入れる:
+ * - タイルと宝石ボタンは、後ろの光を柔らかく透かすすりガラス (障子のように)。ごく細かい粒子を重ねて和紙の肌合いにする
+ * - 角の括弧は和文の鉤括弧「」の形 (左上と右下だけ)
+ * - 色は伝統色 (胡粉・銀鼠・墨)。差し色は宝石の分散の虹色だけ
+ * - 寸法は 4px きざみ
+ */
+
+/* 括弧の色をなめらかに変えるため、型付きのカスタムプロパティにしておく */
+@property --hud-corner {
+  syntax: '<color>';
+  inherits: false;
+  initial-value: rgb(255 255 251 / 0.32);
+}
+
+/* 括弧の腕の長さ (ホバーで伸ばす) */
+@property --hud-bracket {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 8px;
+}
+
+.hud {
+  /* 伝統色 (RGB の3つ組で持ち、透明度は使う所で決める) */
+  --hud-gofun: 255 255 251; /* 胡粉色: 文字と線 */
+  --hud-ginnezu: 175 175 176; /* 銀鼠: 補足の文字 */
+  --hud-sumi: 12 12 14; /* 墨: ガラスの色味 */
+
+  --hud-fg: rgb(var(--hud-gofun) / 0.94);
+  --hud-muted: rgb(var(--hud-ginnezu) / 0.78);
+  --hud-faint: rgb(var(--hud-gofun) / 0.14);
+  --hud-line: rgb(var(--hud-gofun) / 0.32);
+  --hud-line-strong: rgb(var(--hud-gofun) / 0.9);
+  --hud-spectrum: linear-gradient(90deg, #ff5e7e, #ffb35e, #f3f27a, #6effb4, #5ed8ff, #7d7bff, #e07bff, #ff5e7e);
+
+  /* すりガラス: 後ろをぼかし、少し暗くして文字を読みやすくする */
+  --hud-glass: blur(14px) saturate(160%) brightness(0.78);
+  --hud-glass-tint: linear-gradient(160deg, rgb(var(--hud-gofun) / 0.09), rgb(var(--hud-gofun) / 0.015) 55%, rgb(var(--hud-gofun) / 0.04));
+  /* 和紙のようなごく細かい粒子 (白い点。明るさはノイズの赤の値 × 0.09) */
+  --hud-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0.09 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+
+  --hud-display: 'Michroma', 'Eurostile', system-ui, sans-serif;
+  --hud-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --hud-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  --hud-tile: 168px; /* タイルの幅 */
+  --hud-tile-h: 44px; /* タイルの高さ */
+  --hud-gem: 76px; /* スタートボタンの宝石の大きさ */
+  --hud-center: 124px; /* スタートボタンの列の幅 (START→RESTART で左右がずれないよう固定) */
+  --hud-bracket: 8px; /* 括弧の腕の長さ (ホバーで伸びる) */
+  --hud-inset: 12px; /* タイルの左右の余白 (文字と下端の線の端をそろえる) */
+
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px max(20px, env(safe-area-inset-bottom));
+  color: var(--hud-fg);
+  pointer-events: none; /* ボタン以外はドラッグ(カメラ操作)を下のキャンバスに通す */
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  text-shadow: 0 0 12px rgb(0 0 0 / 0.6);
+}
+
+/* フォントが届くまでは出さない (hud.ts)。届いてから登場のアニメーションを始める */
+.hud:not(.is-ready) {
+  visibility: hidden;
+}
+
+/* ボタンの既定の見た目を消す (:where で詳細度を0にして、下の各ボタンの指定を優先させる) */
+:where(.hud) button {
+  pointer-events: auto;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(.hud) button:focus {
+  outline: none;
+}
+
+.hud-deck {
+  display: grid;
+  grid-template-columns: repeat(2, var(--hud-tile)) var(--hud-center) repeat(2, var(--hud-tile));
+  align-items: end; /* タイルの下端をスタートボタンの下端 (START/RESTART の行) にそろえる */
+  column-gap: 8px;
+  row-gap: 8px;
+}
+
+/* 登場。backdrop-filter は祖先に不透明度がかかると後ろを透かせなくなる (その間だけガラスが素通しになる) ので、
+ * 宝石ボタンは位置だけを動かし、中身をそれぞれフェードする。タイルは自分自身のフェードなので問題ない */
+.hud.is-ready .hud-toggle {
+  animation: hud-rise 900ms var(--hud-ease) backwards;
+  animation-delay: calc(var(--hud-order, 0) * 70ms + 150ms);
+}
+
+.hud.is-ready .hud-launch {
+  animation: hud-lift 900ms var(--hud-ease) backwards;
+  animation-delay: calc(var(--hud-order, 0) * 70ms + 150ms);
+}
+
+.hud.is-ready :is(.hud-launch__glass, .hud-launch__gem, .hud-launch__icon, .hud-launch__label) {
+  animation: hud-fade 900ms ease backwards;
+  animation-delay: calc(var(--hud-order, 0) * 70ms + 150ms);
+}
+
+/* --- ON/OFF のタイル --- */
+
+.hud-toggle {
+  --hud-corner: var(--hud-line);
+  position: relative;
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  height: var(--hud-tile-h);
+  padding: 0 var(--hud-inset);
+  text-align: left;
+  background:
+    /* 「 */
+    linear-gradient(var(--hud-corner), var(--hud-corner)) left top / var(--hud-bracket) 1px no-repeat,
+    linear-gradient(var(--hud-corner), var(--hud-corner)) left top / 1px var(--hud-bracket) no-repeat,
+    /* 」 */
+    linear-gradient(var(--hud-corner), var(--hud-corner)) right bottom / var(--hud-bracket) 1px no-repeat,
+    linear-gradient(var(--hud-corner), var(--hud-corner)) right bottom / 1px var(--hud-bracket) no-repeat,
+    var(--hud-grain) 0 0 / 128px 128px,
+    var(--hud-glass-tint);
+  background-color: rgb(var(--hud-sumi) / 0.3);
+  backdrop-filter: var(--hud-glass);
+  -webkit-backdrop-filter: var(--hud-glass);
+  /* ガラスの縁: 上端だけ光を受けて明るく、周りは髪の毛ほどの線。下に薄い影を落として少し浮かせる */
+  box-shadow:
+    inset 0 1px 0 rgb(var(--hud-gofun) / 0.1),
+    inset 0 0 0 1px rgb(var(--hud-gofun) / 0.045),
+    0 10px 24px -14px rgb(0 0 0 / 0.7);
+  transition:
+    --hud-corner 240ms ease,
+    --hud-bracket 320ms var(--hud-ease),
+    transform 160ms var(--hud-ease);
+}
+
+/* ポインターの位置に乗る光 (位置は hud.ts が --hud-mx / --hud-my に入れる) */
+.hud-toggle::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120px circle at var(--hud-mx, 50%) var(--hud-my, 50%), rgb(var(--hud-gofun) / 0.14), transparent 70%);
+  opacity: 0;
+  transition: opacity 320ms ease;
+  pointer-events: none;
+}
+
+/* 文字は光の上に置く */
+.hud-toggle__main,
+.hud-toggle__detail {
+  position: relative;
+}
+
+.hud-toggle:focus-visible {
+  --hud-corner: var(--hud-line-strong);
+}
+
+.hud-toggle:active {
+  transform: scale(0.97);
+}
+
+.hud-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.32;
+}
+
+.hud-toggle__main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-toggle__label {
+  font: 400 11px/12px var(--hud-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transition: opacity 240ms ease;
+}
+
+.hud-toggle[aria-pressed='false'] .hud-toggle__label {
+  opacity: 0.5;
+}
+
+/* 状態の印: 小さな菱形。ON で胡粉色に灯る */
+.hud-toggle__led {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--hud-muted);
+  transform: rotate(45deg);
+  transition:
+    background-color 240ms ease,
+    border-color 240ms ease,
+    box-shadow 240ms ease;
+}
+
+.hud-toggle__led {
+  position: relative;
+}
+
+/* ON にした瞬間、印から光の輪が広がる */
+.hud-toggle__led::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border: 1px solid rgb(var(--hud-gofun) / 0.9);
+  opacity: 0;
+}
+
+.hud-toggle[aria-pressed='true'] .hud-toggle__led::after {
+  animation: hud-ignite 700ms var(--hud-ease);
+}
+
+.hud-toggle[aria-pressed='true'] .hud-toggle__led {
+  background-color: rgb(var(--hud-gofun));
+  border-color: transparent;
+  box-shadow:
+    0 0 6px rgb(var(--hud-gofun) / 0.9),
+    0 0 14px rgb(var(--hud-gofun) / 0.3);
+}
+
+.hud-toggle__detail {
+  font: 400 8.5px/8px var(--hud-mono);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--hud-muted);
+  white-space: nowrap;
+}
+
+/* 下端の線 (文字の幅にそろえる): OFF は薄い線だけ、ON で虹色が左から伸びて、ゆっくり流れる */
+.hud-toggle__bar {
+  position: absolute;
+  left: var(--hud-inset);
+  right: var(--hud-inset);
+  bottom: 0;
+  height: 1px;
+  background: var(--hud-faint);
+}
+
+.hud-toggle__bar::before,
+.hud-toggle__bar::after {
+  content: '';
+  position: absolute;
+  inset: -0.5px 0;
+  background: var(--hud-spectrum) 0 0 / 200% 100% repeat-x;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition:
+    transform 560ms var(--hud-ease),
+    opacity 560ms ease;
+}
+
+.hud-toggle__bar::after {
+  filter: blur(6px); /* ガラスに色がにじむ */
+  opacity: 0;
+}
+
+/* ON は左から伸び、OFF は伸びてきた向き(右)へ引いていく */
+.hud-toggle[aria-pressed='false'] .hud-toggle__bar::before,
+.hud-toggle[aria-pressed='false'] .hud-toggle__bar::after {
+  transform-origin: right;
+}
+
+.hud-toggle[aria-pressed='true'] .hud-toggle__bar::before,
+.hud-toggle[aria-pressed='true'] .hud-toggle__bar::after {
+  transform: scaleX(1);
+  animation: hud-flow 8s linear infinite paused;
+}
+
+/* 流れるのは落下中だけ。止めている間はその位置で止まり、ブラウザも描き直さない */
+.hud[data-phase='running'] .hud-toggle__bar::before,
+.hud[data-phase='running'] .hud-toggle__bar::after {
+  animation-play-state: running;
+}
+
+.hud-toggle[aria-pressed='true'] .hud-toggle__bar::after {
+  opacity: 0.6;
+}
+
+/* --- スタートボタン (真上から見た宝石) --- */
+
+.hud-launch {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+}
+
+.hud-launch:disabled {
+  cursor: progress;
+}
+
+.hud-launch__frame {
+  position: relative;
+  width: var(--hud-gem);
+  height: var(--hud-gem);
+  display: grid;
+  place-items: center;
+  transition: transform 220ms var(--hud-ease);
+}
+
+/* 線画の後ろのすりガラス (hud.ts がガードルの八角形で切り抜く) */
+.hud-launch__glass {
+  position: absolute;
+  inset: 0;
+  background: var(--hud-grain) 0 0 / 128px 128px, var(--hud-glass-tint);
+  background-color: rgb(var(--hud-sumi) / 0.3);
+  backdrop-filter: var(--hud-glass);
+  -webkit-backdrop-filter: var(--hud-glass);
+}
+
+/* 光彩は線画に付ける (frame に filter を掛けるとガラスが後ろを透かせなくなる) */
+.hud-launch__gem {
+  transition: filter 300ms ease;
+}
+
+.hud-launch:focus-visible .hud-launch__gem {
+  filter: drop-shadow(0 0 6px rgb(var(--hud-gofun) / 0.35));
+}
+
+.hud-launch:active .hud-launch__frame {
+  transform: scale(0.94);
+}
+
+.hud-launch__gem {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.hud-launch__gem * {
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+}
+
+.hud-launch__girdle {
+  fill: none;
+  stroke: rgb(var(--hud-gofun) / 0.6);
+  stroke-width: 1;
+  stroke-dasharray: 100;
+}
+
+.hud.is-ready .hud-launch__girdle {
+  animation: hud-draw 1.6s var(--hud-ease) 250ms backwards;
+}
+
+.hud-launch__facets {
+  fill: none;
+  stroke: rgb(var(--hud-gofun) / 0.2);
+  stroke-width: 1;
+  transition: stroke 300ms ease;
+}
+
+.hud-launch__table {
+  fill: rgb(var(--hud-gofun) / 0.035);
+  stroke: rgb(var(--hud-gofun) / 0.42);
+  stroke-width: 1;
+  transition: fill 300ms ease;
+}
+
+.hud-launch:focus-visible .hud-launch__facets {
+  stroke: url(#hud-spectrum);
+}
+
+.hud-launch:focus-visible .hud-launch__table {
+  fill: rgb(var(--hud-gofun) / 0.1);
+}
+
+/* 落ちている間は、虹色の光が縁を回り続ける */
+.hud-launch__trace {
+  fill: none;
+  stroke: url(#hud-spectrum);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 14 86;
+  opacity: 0;
+  transition: opacity 400ms ease;
+}
+
+.hud-launch[data-state='running'] .hud-launch__trace {
+  opacity: 1;
+  animation: hud-trace 1.3s linear infinite;
+}
+
+/* 押した瞬間にファセットが白く光る */
+.hud-launch.is-firing .hud-launch__facets {
+  animation: hud-flash 700ms ease-out;
+}
+
+.hud-launch__icon {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.hud-launch__play {
+  fill: currentColor;
+  stroke: none;
+}
+
+.hud-launch__restart,
+.hud-launch:not([data-state='ready'], [data-state='loading']) .hud-launch__play {
+  display: none;
+}
+
+.hud-launch:not([data-state='ready'], [data-state='loading']) .hud-launch__restart {
+  display: inline;
+}
+
+.hud-launch[data-state='loading'] .hud-launch__icon {
+  opacity: 0.3;
+}
+
+/* 待機中 (押す前と止まった後) は、時々ファセットの線を光がひと筋なでる (hud.ts が is-glinting を付け直して1回ずつ再生する) */
+.hud-launch__glint {
+  transform: translateX(-60px);
+}
+
+.hud-launch.is-glinting .hud-launch__glint {
+  animation: hud-glint 1.4s cubic-bezier(0.45, 0, 0.35, 1); /* 宝石の上を一定の速さで通るよう、ゆっくり始まりゆっくり終わる */
+}
+
+/* 全部止まったら、宝石から波紋が2重に広がる */
+.hud-launch__ripple {
+  fill: none;
+  stroke: rgb(var(--hud-gofun) / 0.75);
+  stroke-width: 1;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.hud-launch[data-state='settled'] .hud-launch__ripple {
+  animation: hud-ripple 1.8s cubic-bezier(0.1, 0.6, 0.3, 1);
+}
+
+.hud-launch[data-state='settled'] .hud-launch__ripple + .hud-launch__ripple {
+  animation-delay: 260ms;
+}
+
+.hud-launch__label {
+  font: 400 11px/12px var(--hud-display);
+  letter-spacing: 0.3em;
+  margin-right: -0.3em; /* 最後の字の後ろの字間を打ち消して中央に揃える */
+  text-transform: uppercase;
+}
+
+/* ホバーはマウスの時だけ (タッチ端末でタップ後に明るいまま残らないように) */
+@media (hover: hover) {
+  .hud-toggle:hover {
+    --hud-corner: var(--hud-line-strong);
+    --hud-bracket: 12px;
+  }
+
+  .hud-toggle:hover::before {
+    opacity: 1;
+  }
+
+  .hud-launch:hover .hud-launch__gem {
+    filter: drop-shadow(0 0 6px rgb(var(--hud-gofun) / 0.35));
+  }
+
+  .hud-launch:hover .hud-launch__facets {
+    stroke: url(#hud-spectrum);
+  }
+
+  .hud-launch:hover .hud-launch__table {
+    fill: rgb(var(--hud-gofun) / 0.1);
+  }
+}
+
+/* --- 宝石を突いた位置の波紋 (hud.ts の ripple) --- */
+
+.hud-tap {
+  position: fixed;
+  width: 56px;
+  height: 56px;
+  margin: -28px 0 0 -28px;
+  pointer-events: none;
+}
+
+.hud-tap svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.hud-tap polygon {
+  fill: none;
+  stroke: rgb(var(--hud-gofun) / 0.85);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: hud-tap 900ms cubic-bezier(0.1, 0.6, 0.3, 1);
+}
+
+.hud-tap polygon + polygon {
+  animation-delay: 140ms;
+}
+
+/* --- キーの案内 (デスクトップだけ) --- */
+
+.hud-hint {
+  display: flex;
+  gap: 24px;
+  font: 400 8.5px/8px var(--hud-mono);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgb(var(--hud-ginnezu) / 0.42);
+}
+
+.hud.is-ready .hud-hint {
+  animation: hud-fade 1.2s ease 900ms backwards;
+}
+
+.hud-hint__entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-hint kbd {
+  font: inherit;
+  letter-spacing: 0.08em;
+  color: rgb(var(--hud-gofun) / 0.62);
+}
+
+@keyframes hud-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+@keyframes hud-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes hud-flow {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes hud-draw {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes hud-trace {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+@keyframes hud-flash {
+  0% {
+    stroke: rgb(255 255 255);
+  }
+}
+
+@keyframes hud-lift {
+  from {
+    transform: translateY(12px);
+  }
+}
+
+@keyframes hud-ignite {
+  from {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(3.4);
+  }
+}
+
+@keyframes hud-glint {
+  to {
+    transform: translateX(160px);
+  }
+}
+
+@keyframes hud-ripple {
+  from {
+    opacity: 0.8;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+@keyframes hud-tap {
+  from {
+    opacity: 0.9;
+    transform: scale(0.3);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.3);
+  }
+}
+
+/* 狭い画面: スタートボタンを中央に置き、タイルを左右に縦に積む (横一列に入らないので) */
+@media (max-width: 880px) {
+  .hud-deck {
+    grid-template-columns: minmax(0, 1fr) var(--hud-center) minmax(0, 1fr);
+    width: min(100%, 540px);
+    align-items: center;
+  }
+
+  .hud-toggle {
+    grid-row: var(--hud-row);
+  }
+
+  .hud-toggle[data-side='left'] {
+    grid-column: 1;
+  }
+
+  .hud-toggle[data-side='right'] {
+    grid-column: 3;
+  }
+
+  .hud-launch {
+    grid-column: 2;
+    grid-row: 1 / span var(--hud-rows);
+  }
+}
+
+/* スマホ (縦長・横長とも): タイルは見出しと印の1段だけにし、スタートボタンも小さくする */
+@media (max-width: 560px), (max-height: 520px) {
+  .hud {
+    --hud-tile-h: 36px;
+    --hud-gem: 52px;
+    --hud-center: 72px;
+    --hud-inset: 8px;
+    --hud-bracket: 6px; /* 下端の線と」の間に隙間を残す */
+    gap: 12px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+
+  .hud-deck {
+    width: min(100%, 420px); /* 横長の画面でタイルが間延びしないように */
+  }
+
+  .hud-toggle__main {
+    gap: 4px;
+  }
+
+  .hud-toggle__label {
+    font-size: 9px;
+    letter-spacing: 0.04em;
+  }
+
+  .hud-toggle__detail {
+    display: none;
+  }
+
+  .hud-launch__icon {
+    width: 14px;
+    height: 14px;
+  }
+
+  .hud-launch__label {
+    font-size: 8.5px;
+    letter-spacing: 0.2em;
+    margin-right: -0.2em;
+  }
+}
+
+@media (max-width: 380px) {
+  .hud-deck {
+    column-gap: 4px;
+  }
+
+  .hud-toggle__label {
+    font-size: 8.5px;
+  }
+}
+
+/* キーの案内はデスクトップだけ (狭い・低い画面と、タッチ操作の端末では出さない) */
+@media (max-width: 880px), (max-height: 520px), (hover: none) {
+  .hud-hint {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud *,
+  .hud *::before,
+  .hud *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
