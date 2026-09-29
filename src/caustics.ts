@@ -5,6 +5,7 @@ import {
   uniformArray, uv, vec2, vec3, vec4,
 } from 'three/tsl'
 import type { GUI } from 'three/addons/libs/lil-gui.module.min.js'
+import { quality } from './quality'
 
 // 宝石のコースティクス (宝石を通った光が床に落とす光の模様)
 //
@@ -24,7 +25,7 @@ import type { GUI } from 'three/addons/libs/lil-gui.module.min.js'
 // 宝石も光の向きも変わらないフレーム(着地後など)は計算を省く。
 // 他の宝石に遮られる光や、宝石の影は扱わない (床はライトで照らさない黒い鏡なので影は見えない)。
 
-const RAYS_PER_SIDE = 96 // 宝石1個に撃つ光線の数 (縦×横)。多いほど模様のざらつきが減るが重い
+const RAYS_PER_SIDE = quality.causticsRaysPerSide // 宝石1個に撃つ光線の数 (縦×横。PC は96)。多いほど模様のざらつきが減るが重い
 const MAX_BOUNCES = 6 // コースティクスで追う最大反射回数 (Gem の bounces とこの小さい方)。それ以降の光は十分弱い
 const WAVELENGTHS = 6 // 出口で光を分ける色の数
 const AREA_HALF = 5 // コースティクスを描く床の範囲 (原点から ±AREA_HALF のワールド単位の正方形)
@@ -145,7 +146,7 @@ export function createCaustics(renderer: THREE.WebGPURenderer, light: THREE.Dire
   let traceNode: THREE.ComputeNode | undefined
   let syncUniforms = () => {}
   let lastSignature = ''
-  const params = { enabled: true, azimuth: 0, elevation: 0, lightSize: 1.5 }
+  const params = { enabled: true, lightSize: 1.5 }
   const lightSpread = uniform(Math.tan(THREE.MathUtils.degToRad(params.lightSize))) // tan(光源の見かけの半径)
 
   // 宝石が読み込まれてから光線追跡の計算シェーダーを組み立てる
@@ -325,29 +326,17 @@ export function createCaustics(renderer: THREE.WebGPURenderer, light: THREE.Dire
     })().compute(rayCount)
 
     // --- GUI ---
-    // ライトの向きは既存の平行光源を動かす (宝石の表面のハイライトも同じライトなので一緒に変わる)
-    const offset = light.position.clone().sub(light.target.position)
-    const spherical = new THREE.Spherical().setFromVector3(offset)
-    params.azimuth = THREE.MathUtils.radToDeg(spherical.theta)
-    params.elevation = 90 - THREE.MathUtils.radToDeg(spherical.phi)
-    const moveLight = () => {
-      spherical.theta = THREE.MathUtils.degToRad(params.azimuth)
-      spherical.phi = THREE.MathUtils.degToRad(90 - params.elevation)
-      light.position.setFromSpherical(spherical).add(light.target.position)
-    }
-    // オン・オフは HUD (hud.ts) から setEnabled で切り替える
+    // オン・オフは HUD (hud.ts) から setEnabled で切り替える。
+    // ライトの向きと強さは時刻で動かしているので、GUI も timeOfDay.ts (Time の light azimuth / light elevation / light intensity) にある
     const folder = gui.addFolder('Caustics')
     folder.add(strength, 'value', 0, 10).name('strength')
     folder.add(blur, 'value', 0, 0.2).name('blur')
-    folder.add(params, 'azimuth', -180, 180).name('light azimuth').onChange(moveLight)
-    folder.add(params, 'elevation', 5, 90).name('light elevation').onChange(moveLight)
     // 光源の見かけの大きさ (半径, 度)。太陽は約0.27°。大きいほど、宝石から遠い所の模様が柔らかくなる
     folder.add(params, 'lightSize', 0, 10).name('light size').onChange((deg: number) => (lightSpread.value = Math.tan(THREE.MathUtils.degToRad(deg))))
-    folder.add(light, 'intensity', 0, 10).name('light intensity')
   }
 
-  // 毎フレーム、描画の前に呼ぶ
-  function update() {
+  // 毎フレーム、描画の前に呼ぶ。force なら値が変わっていなくても計算し直す (?bench で、落下中と同じ仕事量を測るため)
+  function update(force = false) {
     if (!supported || !source || !traceNode || !params.enabled) return
     syncUniforms()
     // 宝石・ライト・マテリアルの値が前のフレームと同じなら、前の結果をそのまま使う
@@ -357,7 +346,7 @@ export function createCaustics(renderer: THREE.WebGPURenderer, light: THREE.Dire
       light.position.x, light.position.y, light.position.z, lightSpread.value,
       material.ior, material.dispersion, material.attenuationDistance, material.color.getHex(), bounces.value, blur.value,
     ].join(',')
-    if (signature === lastSignature) return
+    if (!force && signature === lastSignature) return
     lastSignature = signature
 
     renderer.compute([resetNode, traceNode, clampNode])

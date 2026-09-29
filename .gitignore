@@ -25,3 +25,4 @@ dist-ssr
 
 # 開発用HTTPSの証明書と秘密鍵 (mkcert で各マシンで作る)
 certs/
+.vercel

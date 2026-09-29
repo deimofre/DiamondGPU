@@ -1,10 +1,13 @@
 import * as THREE from 'three/webgpu'
-import RAPIER from '@dimforge/rapier3d-compat'
+import RAPIER from '@dimforge/rapier3d'
 
 // 宝石の落下の物理シミュレーション (Rapier)
 //
-// 以前は Blender で焼き込んだ落下アニメーションを再生していた。ここではその最初の姿勢(空中)だけを引き継ぎ、
-// start() で落とし始める。見る人の操作で結果が変わるようにするための土台。
+// 以前は Blender で焼き込んだ落下アニメーションを再生していた。今の GLB にはその最初の姿勢(空中)だけが入っていて
+// (アニメーションは外した)、start() でそこから落とし始める。見る人の操作で結果が変わるようにするための土台。
+// - Rapier の wasm (約3MB) は別ファイルで、このモジュールを読み込んだ時点で初期化まで済む。
+//   最初の絵を待たせないよう、main.ts が import() で後から読む
+//   (以前の rapier3d-compat は wasm を base64 で JS に埋め込んでいて、JS 全体の7割を占めていた)
 // - 当たり判定は宝石の形そのままの凸包 (内部反射シェーダーも凸の前提なので、見た目と一致する)
 // - 床は y=0 が上面の厚みのある板
 // - 描画のフレームとは切り離し、1/120秒刻みの固定ステップで進める (フレームレートが違っても同じ動きになる)
@@ -16,8 +19,7 @@ const FRICTION = 0.5 // 摩擦 (Blender の剛体の初期値と同じ)
 const RESTITUTION = 0.2 // 跳ね返り
 
 // gems: 同じジオメトリを共有する宝石。親の変換が無い(シーン直下)前提で、位置と向きを直接書き換える
-export async function createGemPhysics(gems: THREE.Mesh[]) {
-  await RAPIER.init()
+export function createGemPhysics(gems: THREE.Mesh[]) {
   const world = new RAPIER.World({ x: 0, y: GRAVITY, z: 0 })
   world.timestep = STEP
 
@@ -104,3 +106,6 @@ export async function createGemPhysics(gems: THREE.Mesh[]) {
     get settled() { return running && bodies.every((body) => body.isSleeping()) },
   }
 }
+
+// main.ts は物理を後から読むので、型だけを先に使う (import type は実行時に読み込まない)
+export type GemPhysics = ReturnType<typeof createGemPhysics>

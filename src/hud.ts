@@ -26,12 +26,21 @@ export interface HudShortcut {
   action(): void
 }
 
+// 左上の小さな時刻 (timeOfDay.ts)。time は「18:42」の形、phase で朝・昼・夕・夜の印を選ぶ
+export interface HudClock {
+  time: string
+  phase: 'morning' | 'day' | 'evening' | 'night'
+}
+
 export interface HudOptions {
   toggles: HudToggle[] // 前半はスタートボタンの左、後半は右に並ぶ
+  camera?: Pick<HudToggle, 'label' | 'get' | 'set'> // 自動カメラ。下の列から離し、右上に小さく置く (C キー)
   start(): void
   status(): HudStatus | undefined // undefined の間は準備中 (物理の読み込み前) として押せない
   shortcuts?: HudShortcut[]
   changed?(): void // HUD で何か切り替えた後に呼ぶ (3D の描き直しの合図)
+  ready?: Promise<unknown> // 登場させるきっかけ (読み込み中の幕が上がり始める時。無ければフォントが届き次第)
+  clock?(): HudClock // 毎フレーム読む。変わった時だけ表示を書き換える
 }
 
 // スタートボタンの図形: ブリリアントカットを真上から見た形 (viewBox 100×100)。
@@ -87,8 +96,32 @@ const LAUNCH_SVG = `
   <g class="hud-launch__restart"><path d="M17.6 9.2A6 6 0 1 0 18 12"/><path d="M18.2 5.4v4h-4"/></g>
 </svg>`
 
+// 時間帯の印 (viewBox 24×24 の線画)。4つを重ねておき、今の時間帯のものだけを見せる (切り替わる時はゆっくり入れ替わる)。
+// 朝と夕は地平線の上の半分の太陽で、上の山形の向き (昇る・沈む) で見分ける。昼は光を放つ太陽、夜は三日月
+// (小さく表示するので、山形と太陽の間は広めに空ける。矢印の軸まで描くと太陽とくっついて見分けにくかった)
+const SUN_RAYS = Array.from({ length: 8 }, (_, k) => {
+  const angle = (k * Math.PI) / 4
+  const [x0, y0, x1, y1] = [6.6, 6.6, 9, 9].map((r, i) => +(12 + r * (i % 2 === 0 ? Math.cos(angle) : Math.sin(angle))).toFixed(2))
+  return `M${x0},${y0}L${x1},${y1}`
+}).join('')
+const PHASE_NAMES: Record<HudClock['phase'], string> = { morning: 'Morning', day: 'Day', evening: 'Evening', night: 'Night' }
+const CLOCK_SVG = `
+<svg class="hud-clock__mark" viewBox="0 0 24 24" aria-hidden="true">
+  <path data-phase="morning" d="M3 18.5h18M7 18.5a5 5 0 0 1 10 0M9 8.5 12 5.5 15 8.5"/>
+  <g data-phase="day"><circle cx="12" cy="12" r="3.8"/><path d="${SUN_RAYS}"/></g>
+  <path data-phase="evening" d="M3 18.5h18M7 18.5a5 5 0 0 1 10 0M9 5.5 12 8.5 15 5.5"/>
+  <path data-phase="night" d="M10.5 4.1A8 8 0 1 0 19.6 14.5 7 7 0 0 1 10.5 4.1z"/>
+</svg>`
 
-export function createHud({ toggles, start, status, shortcuts = [], changed = () => {} }: HudOptions) {
+// 自動カメラの印 (viewBox 24×24 の線画): 宝石 (菱形) の周りを回るカメラの軌道を斜めから見た楕円と、手前のカメラの点
+const CAMERA_SVG = `
+<svg class="hud-camera__mark" viewBox="0 0 24 24" aria-hidden="true">
+  <ellipse cx="12" cy="12" rx="10" ry="4.5"/>
+  <path d="M12,9.4 14,12 12,14.6 10,12z"/>
+  <circle class="hud-camera__eye" cx="12" cy="16.5" r="1.8"/>
+</svg>`
+
+export function createHud({ toggles, camera, start, status, shortcuts = [], changed = () => {}, ready, clock }: HudOptions) {
   const root = document.createElement('div')
   root.className = 'hud'
   const deck = document.createElement('div')
@@ -106,7 +139,7 @@ export function createHud({ toggles, start, status, shortcuts = [], changed = ()
   // (狭い画面ではスタートボタンの左右に縦に積むので、左右どちらの何段目かを持たせておく)
   const half = Math.ceil(toggles.length / 2)
   deck.style.setProperty('--hud-rows', String(half))
-  const flip = (toggle: HudToggle) => {
+  const flip = (toggle: Pick<HudToggle, 'get' | 'set'>) => {
     toggle.set(!toggle.get())
     changed()
   }
@@ -165,6 +198,19 @@ export function createHud({ toggles, start, status, shortcuts = [], changed = ()
     launch.classList.add('is-glinting')
   }, 7000)
 
+  // 右上の自動カメラ: 左上の時刻と対にして、同じくらい小さく置く (タイルのガラスや括弧は付けない)
+  const cameraView = camera && (() => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'hud-camera'
+    button.title = `${camera.label} (C)`
+    button.append(span('hud-camera__label', camera.label))
+    button.insertAdjacentHTML('beforeend', CAMERA_SVG)
+    button.addEventListener('click', () => flip(camera))
+    root.append(button)
+    return { button, shown: undefined as boolean | undefined }
+  })()
+
   const items = [...toggleViews.slice(0, half).map((view) => view.button), launch, ...toggleViews.slice(half).map((view) => view.button)]
   items.forEach((item, i) => item.style.setProperty('--hud-order', String(i)))
   deck.append(...items)
@@ -172,6 +218,7 @@ export function createHud({ toggles, start, status, shortcuts = [], changed = ()
   const hints = [
     [`1–${toggleViews.length}`, 'Toggle'],
     ['Space', 'Start'],
+    ...(camera ? [['C', 'Camera']] : []),
     ...shortcuts.map(({ key, label }) => [key.toUpperCase(), label]),
   ]
   const hint = span('hud-hint')
@@ -183,14 +230,28 @@ export function createHud({ toggles, start, status, shortcuts = [], changed = ()
     hint.append(entry)
   }
   root.append(hint)
+
+  // 左上の時刻: 時間帯の印 | 18:42
+  const clockView = clock && (() => {
+    const element = span('hud-clock')
+    element.setAttribute('role', 'img')
+    const mark = span('hud-clock__frame')
+    mark.innerHTML = CLOCK_SVG
+    const time = document.createElement('time')
+    time.className = 'hud-clock__time'
+    element.append(mark, time)
+    root.append(element)
+    return { element, time, shown: '' }
+  })()
   document.body.append(root)
 
   // フォントが届く前に出すと、差し替わる時に文字の幅が変わってがたつくので、読み込みを待ってから登場させる
-  // (届かなくても1.5秒で出す)
-  Promise.race([
+  // (届かなくても1.5秒で出す)。幕の裏で登場のアニメーションを済ませてしまわないよう、ready も待つ
+  const fonts = Promise.race([
     Promise.all([document.fonts.load('11px Michroma'), document.fonts.load('9px "JetBrains Mono"')]),
     new Promise((resolve) => setTimeout(resolve, 1500)),
-  ]).finally(() => root.classList.add('is-ready'))
+  ]).catch(() => {})
+  Promise.all([fonts, ready]).then(() => root.classList.add('is-ready'))
 
   // lil-gui の入力欄などで打っている文字は拾わない
   addEventListener('keydown', (event) => {
@@ -205,6 +266,8 @@ export function createHud({ toggles, start, status, shortcuts = [], changed = ()
       if (target instanceof HTMLButtonElement) return
       event.preventDefault()
       fire()
+    } else if (camera && event.key.toLowerCase() === 'c') {
+      flip(camera)
     } else {
       shortcuts.find((shortcut) => shortcut.key === event.key.toLowerCase())?.action()
     }
@@ -220,6 +283,11 @@ export function createHud({ toggles, start, status, shortcuts = [], changed = ()
       view.shown = on
       view.button.setAttribute('aria-pressed', String(on))
     }
+    const cameraOn = camera?.get()
+    if (cameraView && cameraOn !== cameraView.shown) {
+      cameraView.shown = cameraOn
+      cameraView.button.setAttribute('aria-pressed', String(cameraOn))
+    }
 
     const current = status()
     const next = !current ? 'loading' : current.settled ? 'settled' : current.running ? 'running' : 'ready'
@@ -229,6 +297,18 @@ export function createHud({ toggles, start, status, shortcuts = [], changed = ()
       root.dataset.phase = phase // 虹色の線は落下中だけ流す (hud.css)
       launch.disabled = phase === 'loading'
       launchLabel.textContent = phase === 'ready' || phase === 'loading' ? 'Start' : 'Restart'
+    }
+
+    if (clock && clockView) {
+      const { time, phase: dayPhase } = clock()
+      const shown = `${time} ${dayPhase}`
+      if (shown !== clockView.shown) {
+        clockView.shown = shown
+        clockView.time.textContent = time
+        clockView.time.dateTime = time
+        clockView.element.dataset.phase = dayPhase
+        clockView.element.setAttribute('aria-label', `${PHASE_NAMES[dayPhase]} ${time}`)
+      }
     }
   }
 

@@ -13,10 +13,14 @@ import type { GUI } from 'three/addons/libs/lil-gui.module.min.js'
 //   上面のファセットに白い筋と暗い部屋が交互に映り込み、宝石や視点が動くと筋が面から面へ移ってきらめく
 //   (ジュエリー撮影で細長い光と黒い板を交互に置くのと同じ。筋の間の暗い部屋が黒い板の役をする)
 // - 床: 黒 (実際の床は黒い鏡)
+// - 窓: 朝・昼・夕方だけ外の光が入る (時刻による光の移ろい。timeOfDay.ts)。夜は無く、上の照明だけになる
 // 映り込みと宝石の中を通る光(gemTracer.ts)にだけ使われ、画面の背景は stage.ts のグラデーションのまま。
 // ライトの向き・大きさ・GUIの値が変わった時だけ作り直す (PMREMへの変換は数ms)。毎フレームの負荷は無い
 const DISTANCE = 8 // 照明を置く距離
 const FLOOR_Y = -0.35 // 環境マップは原点から撮るので、着地した宝石の中心(y≈0.35)から見た床の高さ
+const WINDOW_WIDTH = 5 // 窓の大きさ (距離 8.6 に置くので、見かけは横 約33°・縦 約20°)
+const WINDOW_HEIGHT = 3
+const WINDOW_DISTANCE = DISTANCE + 0.6
 
 export function createStudio(
   renderer: THREE.WebGPURenderer,
@@ -78,6 +82,19 @@ export function createStudio(
   const key = new THREE.Mesh(new THREE.CircleGeometry(1, 32), keyMaterial)
   environmentScene.add(key)
 
+  // 窓 (時刻による光の移ろい。timeOfDay.ts が setWindow で色と明るさを決める)。夜は消えていて、朝・昼・夕方は外の光が入る面になる。
+  // キーライト(昼は太陽の役)と同じ方位の、ストリップライトより少し奥に縦に立てる
+  // (太陽が窓の中に見え、重なる所ではストリップライトの筋が窓の桟のように手前に来る)。
+  // 明るさは部屋の壁に足す (0 で壁と同じになり、夜の見た目とつながる)
+  const windowMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })
+  const windowPane = new THREE.Mesh(new THREE.PlaneGeometry(WINDOW_WIDTH, WINDOW_HEIGHT), windowMaterial)
+  environmentScene.add(windowPane)
+  const sky = { color: new THREE.Color(), intensity: 0 }
+  function setWindow(color: THREE.Color, intensity: number) {
+    sky.color.copy(color)
+    sky.intensity = intensity
+  }
+
   const pmrem = new THREE.PMREMGenerator(renderer)
   let target: THREE.RenderTarget | undefined
   let lastSignature = ''
@@ -88,7 +105,7 @@ export function createStudio(
     const size = THREE.MathUtils.degToRad(Math.max(getLightSize(), 0.25))
     const signature = [
       light.position.x, light.position.y, light.position.z, light.intensity, light.color.getHex(), size, params.softbox, params.room,
-      params.strips, params.stripCount, params.stripWidth,
+      params.strips, params.stripCount, params.stripWidth, sky.color.getHex(), sky.intensity,
     ].join(',')
     if (signature === lastSignature) return
     lastSignature = signature
@@ -100,6 +117,10 @@ export function createStudio(
     key.scale.setScalar(DISTANCE * radius)
     keyMaterial.color.copy(light.color).multiplyScalar(light.intensity / (Math.PI * radius * radius))
     roomMaterial.color.setScalar(params.room)
+    windowPane.position.copy(direction).multiplyScalar(WINDOW_DISTANCE)
+    windowPane.lookAt(0, windowPane.position.y, 0) // 縦に立てる (部屋の中心の方を水平に向く)
+    windowPane.visible = sky.intensity > 0
+    windowMaterial.color.copy(sky.color).multiplyScalar(sky.intensity).addScalar(params.room)
     for (const { material, gain } of softboxes) material.color.setScalar(params.softbox * gain)
     buildStrips()
     stripMaterial.color.setScalar(params.strips)
@@ -115,5 +136,5 @@ export function createStudio(
   folder.add(params, 'stripCount', 2, 16, 1) // 本数
   folder.add(params, 'stripWidth', 0.05, 1) // 幅 (距離8に置くので、0.3 で見かけの幅は約2°)
 
-  return { texture: target!.texture, update }
+  return { texture: target!.texture, update, setWindow }
 }

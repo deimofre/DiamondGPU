@@ -4,10 +4,34 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0b14" />
     <title>WebGPU (TSL) + PostProcessing</title>
+    <link rel="stylesheet" href="/src/loader.css" />
   </head>
   <body>
     <div id="app"></div>
+    <!-- 読み込み中の幕 (src/loader.ts・src/loader.css)。JS が届く前から出すので、ここに直接書く。
+         線画は HUD のスタートボタン (src/hud.ts の GIRDLE・TABLE・FACETS) と同じ、ブリリアントカットを真上から見た形 -->
+    <div class="loader" role="progressbar" aria-label="Loading" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="loader__veil"></div>
+      <div class="loader__mark">
+        <div class="loader__orbit"></div>
+        <svg class="loader__cut" viewBox="0 0 100 100" aria-hidden="true">
+          <path class="loader__facets" d="M92.5,32.4L76,50L92.5,67.6M67.6,7.5L68.38,31.62L92.5,32.4M32.4,7.5L50,24L67.6,7.5M7.5,32.4L31.62,31.62L32.4,7.5M7.5,67.6L24,50L7.5,32.4M32.4,92.5L31.62,68.38L7.5,67.6M67.6,92.5L50,76L32.4,92.5M92.5,67.6L68.38,68.38L67.6,92.5" />
+          <polygon class="loader__table" points="76,50 68.38,31.62 50,24 31.62,31.62 24,50 31.62,68.38 50,76 68.38,68.38" />
+        </svg>
+        <svg class="loader__outline" viewBox="0 0 100 100" aria-hidden="true">
+          <polygon class="loader__girdle" points="92.5,32.4 67.6,7.5 32.4,7.5 7.5,32.4 7.5,67.6 32.4,92.5 67.6,92.5 92.5,67.6" />
+          <polygon class="loader__progress" points="92.5,32.4 67.6,7.5 32.4,7.5 7.5,32.4 7.5,67.6 32.4,92.5 67.6,92.5 92.5,67.6" pathLength="100" />
+        </svg>
+        <svg class="loader__flash" viewBox="0 0 100 100" aria-hidden="true">
+          <polygon points="92.5,32.4 67.6,7.5 32.4,7.5 7.5,32.4 7.5,67.6 32.4,92.5 67.6,92.5 92.5,67.6" />
+          <path d="M92.5,32.4L76,50L92.5,67.6M67.6,7.5L68.38,31.62L92.5,32.4M32.4,7.5L50,24L67.6,7.5M7.5,32.4L31.62,31.62L32.4,7.5M7.5,67.6L24,50L7.5,32.4M32.4,92.5L31.62,68.38L7.5,67.6M67.6,92.5L50,76L32.4,92.5M92.5,67.6L68.38,68.38L67.6,92.5" />
+          <polygon points="76,50 68.38,31.62 50,24 31.62,31.62 24,50 31.62,68.38 50,76 68.38,68.38" />
+        </svg>
+      </div>
+      <p class="loader__caption" aria-live="polite"><span>Loading</span></p>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

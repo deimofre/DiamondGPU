@@ -20,6 +20,17 @@ import {
 // 光線と面の交差は、宝石が凸多面体であることを使って「面の平面」だけで求める。凸多面体の内側から
 // 出ていく点は、進行方向を向いた面の平面との交点のうち最も近いもの。三角形ごとに調べるより軽い。
 // そのため凹みのある形状には使えない。
+//
+// 重さのほとんどはこの「全部の面を調べる」ところ (1ピクセルあたり 反射5回 × 193面)。iPhone・iPad では1コマの大半を占めた。
+// そこで面を向きで3つのまとまりに分け (groupFacetPlanes)、出口になりえないと確かめられるまとまりは丸ごと飛ばす。
+// 飛ばすのは確かめられた時だけなので、結果は全部調べた時と同じ:
+// - 上向きの面 (テーブル・クラウン): 光が急な下向きに進む時は、どれも進行方向を向かない (一番寝た面の傾きで決まる)
+// - 下向きの面 (パビリオン): 同じく、急な上向きの時は飛ばす
+// - 横向きの面 (ガードル): 先に上下の面で出口を求め、その点がガードルの内側にあれば、ガードルからは出ない
+// iPhone 16 Pro (?bench、宝石が画面いっぱいの場面) で、宝石の描画は 18.1ms → 8.2ms、全体で 33 → 52fps になった。
+// Mac (M1 Max・Chrome) では速さは変わらなかった (GPU とシェーダーの組み立て方の違い)。
+// 試して採らなかったもの: 環境マップを PMREM の代わりに普通のキューブマップで引く。単独では Mac で変わらず、
+// この方式と組み合わせると Mac で2倍遅くなった (シェーダーが同時に抱える値が増え、GPU が同時に動かせる数が減ったと思われる)
 
 // ジオメトリから面の平面(外向き法線 xyz と、原点からの距離 w)を重複なしで取り出す
 export function extractFacetPlanes(geometry: THREE.BufferGeometry): THREE.Vector4[] {
@@ -43,6 +54,32 @@ export function extractFacetPlanes(geometry: THREE.BufferGeometry): THREE.Vector
   return planes
 }
 
+// 面を法線の向きで 上向き・下向き・横向き に分けて並べ直し、まとまりごと飛ばす判定に使う値を求める
+const SIDE_Y = 0.2 // 法線の y の絶対値がこれ以下の面を横向き (ガードル) とする
+function groupFacetPlanes(planes: THREE.Vector4[]) {
+  const up = planes.filter((p) => p.y > SIDE_Y)
+  const down = planes.filter((p) => p.y < -SIDE_Y)
+  const side = planes.filter((p) => Math.abs(p.y) <= SIDE_Y)
+  const horizontal = (p: THREE.Vector4) => Math.hypot(p.x, p.z)
+  // まとまりの中で一番寝た面の傾き (|法線の y| ÷ 法線の水平成分)。光の向きの水平成分が「縦成分 × これ」以下なら、
+  // どの面も進行方向を向かない (真上・真下向きの面だけなら大きな値にしておく)
+  const slope = (group: THREE.Vector4[]) => Math.min(1e6, ...group.map((p) => Math.abs(p.y) / Math.max(horizontal(p), 1e-9)))
+  // 点 (水平の距離 r, 高さ y) が横向きの面すべての内側にあると言える条件: r × sideXZ + |y| × sideY ≤ sideW
+  const sideXZ = Math.max(0, ...side.map(horizontal))
+  const sideY = Math.max(0, ...side.map((p) => Math.abs(p.y)))
+  const sideW = Math.min(1e6, ...side.map((p) => p.w))
+  return {
+    planes: [...up, ...down, ...side], // この順に並べる
+    upCount: up.length,
+    downCount: down.length,
+    upSlope: slope(up),
+    downSlope: slope(down),
+    sideXZ,
+    sideY,
+    sideW,
+  }
+}
+
 type GemTracerOptions = {
   planes: THREE.Vector4[]
   envMap: THREE.Texture
@@ -55,8 +92,9 @@ type GemTracerOptions = {
 // 宝石の中を通って出てくる光(表面反射を除いた分)を返す。マテリアルの ior/dispersion/roughness/
 // attenuationDistance/color(基本色) を参照するので、GUIの値がそのまま効く
 export function createGemTracer({ planes, envMap, envIntensity, gemColor, bounces, fireScale }: GemTracerOptions) {
-  const planeArray = uniformArray(planes, 'vec4' as const)
-  const planeCount = planes.length
+  const groups = groupFacetPlanes(planes)
+  const planeArray = uniformArray(groups.planes, 'vec4' as const)
+  const sideStart = groups.upCount + groups.downCount
 
   // 環境マップはワールド座標の方向で引く。roughness が大きいほどぼけた映り込みになる
   const sampleEnvironment = (dirLocal: THREE.Node<'vec3'>) => {
@@ -100,17 +138,29 @@ export function createGemTracer({ planes, envMap, envIntensity, gemColor, bounce
       // 進行方向を向いた面のうち、最も近い平面との交点が出口
       const tMin = float(1e6).toVar()
       const hitNormal = vec3(0, 1, 0).toVar()
-      Loop(planeCount, ({ i }) => {
-        const plane = planeArray.element(i)
-        const facing = dot(plane.xyz, dir)
-        If(facing.greaterThan(1e-6), () => {
-          const t = plane.w.sub(dot(plane.xyz, pos)).div(facing)
-          If(t.lessThan(tMin), () => {
-            tMin.assign(t)
-            hitNormal.assign(plane.xyz)
+      const testPlanes = (start: number, end: number) => {
+        if (end <= start) return
+        Loop({ start: int(start), end: int(end), type: 'int' }, ({ i }) => {
+          const plane = planeArray.element(i)
+          const facing = dot(plane.xyz, dir)
+          If(facing.greaterThan(1e-6), () => {
+            const t = plane.w.sub(dot(plane.xyz, pos)).div(facing)
+            If(t.lessThan(tMin), () => {
+              tMin.assign(t)
+              hitNormal.assign(plane.xyz)
+            })
           })
         })
-      })
+      }
+      // 上向き・下向きの面は、光が急な下向き・上向きに進む時は飛ばす
+      const across = dir.xz.length().toVar()
+      If(across.greaterThan(dir.y.negate().mul(groups.upSlope)), () => testPlanes(0, groups.upCount))
+      If(across.greaterThan(dir.y.mul(groups.downSlope)), () => testPlanes(groups.upCount, sideStart))
+      // 横向きの面は、上下の面で求めた出口がガードルの内側に無い時だけ調べる
+      const exit = pos.add(dir.mul(tMin))
+      If(exit.xz.length().mul(groups.sideXZ).add(exit.y.abs().mul(groups.sideY)).greaterThan(groups.sideW), () =>
+        testPlanes(sideStart, groups.planes.length),
+      )
 
       const segment = max(tMin, 0)
       pos.addAssign(dir.mul(segment))

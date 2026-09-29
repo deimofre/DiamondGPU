@@ -4,6 +4,7 @@ import {
   smoothstep, texture, uniform, vec2, vec3,
 } from 'three/tsl'
 import type { GUI } from 'three/addons/libs/lil-gui.module.min.js'
+import { quality } from './quality'
 
 // 床のラフネスマップ (細かい傷・汚れ。黒=つるつる、白=ざらざら)
 const ROUGHNESS_MAP_URL = '/glass-roughness.webp'
@@ -11,12 +12,22 @@ const ROUGHNESS_MAP_URL = '/glass-roughness.webp'
 // 背景と床 (ジュエリー撮影のスタジオのような見え方)
 // - 背景: 画面中央が少し明るい放射状のグラデーション
 // - 床: 黒い鏡面。遠くほど背景と同じ色に溶け込ませて、床の端(地平線)を見せない
-const BLUR_TAPS = 16 // 映り込みをぼかすサンプル数
+const BLUR_TAPS = quality.reflectionTaps // 映り込みをぼかすサンプル数 (PC は16)
 const GOLDEN_ANGLE = 2.39996
 // floorLight: 床に届く光 (コースティクス)。映り込みに足す
 export function createStage(scene: THREE.Scene, gui: GUI, floorLight: THREE.Node<'vec3'> = vec3(0)) {
-  const bgCenter = uniform(new THREE.Color('#595e6e'))
-  const bgEdge = uniform(new THREE.Color('#353555'))
+  // 中心と外側の色 (GUI の bgCenter / bgEdge)。シェーダーには、これに時刻の色 (timeOfDay.ts の setBackgroundTint) を
+  // 掛けた色を渡す (掛け算は色が変わった時だけ CPU で済ませる)。夜は白を掛ける = この2色のまま
+  const baseCenter = new THREE.Color('#595e6e')
+  const baseEdge = new THREE.Color('#353555')
+  const centerTint = new THREE.Color(1, 1, 1)
+  const edgeTint = new THREE.Color(1, 1, 1)
+  const bgCenter = uniform(baseCenter.clone())
+  const bgEdge = uniform(baseEdge.clone())
+  const updateBackground = () => {
+    bgCenter.value.copy(baseCenter).multiply(centerTint)
+    bgEdge.value.copy(baseEdge).multiply(edgeTint)
+  }
   const bgSpread = uniform(0.8) // 中心からこの距離(画面の高さ基準)で外側の色になる
 
   // 背景と床の遠方の両方で使うので関数にしておく
@@ -28,8 +39,8 @@ export function createStage(scene: THREE.Scene, gui: GUI, floorLight: THREE.Node
   scene.backgroundNode = backgroundColor()
 
   // reflector はカメラを床で鏡映しにした視点からシーンをもう一度描き、その画像を床に貼る。
-  // 描画負荷が増えるので半分の解像度にしている
-  const reflection = reflector({ resolutionScale: 0.5, generateMipmaps: true })
+  // 描画負荷が増えるので解像度を下げている (PC は半分、スマホは1/4。quality.ts)
+  const reflection = reflector({ resolutionScale: quality.reflectionScale, generateMipmaps: true })
   reflection.target.rotateX(-Math.PI / 2)
   scene.add(reflection.target)
 
@@ -53,7 +64,7 @@ export function createStage(scene: THREE.Scene, gui: GUI, floorLight: THREE.Node
     const depth = max(positionView.z.negate(), 0.1)
     const radius = floorRoughness.div(depth).div(0.93) // 画面の高さに対する割合 (0.93 ≈ 2·tan(視野角50°/2))
     const aspect = screenSize.y.div(screenSize.x)
-    const tapSpacing = radius.mul(screenSize.y).mul(0.5).mul(Math.sqrt(Math.PI / BLUR_TAPS)) // 反射画像(半分の解像度)でのサンプル間隔
+    const tapSpacing = radius.mul(screenSize.y).mul(quality.reflectionScale).mul(Math.sqrt(Math.PI / BLUR_TAPS)) // 反射画像でのサンプル間隔
     const level = log2(max(tapSpacing, 1))
     const center = screenUV.flipX()
     const sum = vec3(0).toVar()
@@ -82,10 +93,16 @@ export function createStage(scene: THREE.Scene, gui: GUI, floorLight: THREE.Node
   scene.add(floor)
 
   // lil-gui の色はsRGBの16進文字列で扱い、変更時に Color.set() で変換して入れる
-  const params = { bgCenter: `#${bgCenter.value.getHexString()}`, bgEdge: `#${bgEdge.value.getHexString()}` }
+  const params = { bgCenter: `#${baseCenter.getHexString()}`, bgEdge: `#${baseEdge.getHexString()}` }
   const folder = gui.addFolder('Stage')
-  folder.addColor(params, 'bgCenter').onChange((value: string) => bgCenter.value.set(value))
-  folder.addColor(params, 'bgEdge').onChange((value: string) => bgEdge.value.set(value))
+  folder.addColor(params, 'bgCenter').onChange((value: string) => {
+    baseCenter.set(value)
+    updateBackground()
+  })
+  folder.addColor(params, 'bgEdge').onChange((value: string) => {
+    baseEdge.set(value)
+    updateBackground()
+  })
   folder.add(bgSpread, 'value', 0.2, 2).name('bgSpread')
   folder.add(floor, 'visible').name('floor')
   folder.add(reflectivity, 'value', 0, 1).name('reflectivity')
@@ -101,5 +118,11 @@ export function createStage(scene: THREE.Scene, gui: GUI, floorLight: THREE.Node
     floorMaterial.needsUpdate = true
   }
 
-  return { reflection: () => reflectionEnabled, setReflection }
+  function setBackgroundTint(center: THREE.Color, edge: THREE.Color) {
+    centerTint.copy(center)
+    edgeTint.copy(edge)
+    updateBackground()
+  }
+
+  return { reflection: () => reflectionEnabled, setReflection, setBackgroundTint }
 }

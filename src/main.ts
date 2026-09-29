@@ -12,10 +12,17 @@ import { createStarStreak } from './starStreak'
 import { createCameraPath } from './cameraPath'
 import { createCaustics } from './caustics'
 import { createStudio } from './studio'
-import { createGemPhysics } from './physics'
+import type { GemPhysics } from './physics'
+import { createLoader } from './loader'
 import { createHud } from './hud'
 import { createGemPoke } from './poke'
 import { createLens } from './lens'
+import { quality } from './quality'
+import { benchEnabled, createDebugOverlay, debugEnabled, type BenchStep } from './debug'
+import { createFrameTiming } from './frameTiming'
+import { createResolution } from './resolution'
+import { createCrossfade } from './crossfade'
+import { createTimeOfDay } from './timeOfDay'
 
 // public/ に置いた GLB を読み込む (例: public/model.glb → '/model.glb')
 const MODEL_URL = '/gem_drop_x8.glb'
@@ -23,6 +30,16 @@ const MODEL_URL = '/gem_drop_x8.glb'
 const GEM_MATERIAL_NAME = 'GemGlass'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
+
+// --- 読み込み中の幕 (loader.ts) ---
+// 最初の絵を出す条件がそろうまで幕で覆い、幕を上げ終わってから落とし始める。
+// 条件: GPU の準備 / GLB / 物理 / 宝石を1回描き終えた (最初の描画はシェーダーの組み立てで時間がかかるので、それも幕の裏で済ませる)
+const loader = createLoader(['gpu', 'model', 'physics', 'firstFrame'] as const)
+
+// 物理 (physics.ts) は Rapier の wasm (約3MB) ごと別のファイルにして、最初の絵をそれで待たせない。
+// 読み始めるのは起動直後 (GPU の準備・GLB・シェーダーの組み立てと並行して届くように)
+const physicsModule = import('./physics')
+physicsModule.catch((error) => loader.fail(error))
 
 const scene = new THREE.Scene()
 
@@ -32,16 +49,27 @@ camera.position.set(3, 2, 4)
 // WebGPURenderer: WebGPU非対応環境では自動でWebGL2にフォールバックする
 const renderer = new THREE.WebGPURenderer({ antialias: true })
 renderer.setSize(innerWidth, innerHeight)
-// 画面本来の解像度で描く (Retinaは2倍、普通のモニターは等倍)。
+// 描画倍率 (resolution.ts)。PC は画面本来の解像度 (Retinaは2倍、普通のモニターは等倍)。
+// スマホ・タブレットは描く画素の数の予算に収まる倍率にし、それでも重すぎる端末では自動で下げる (?bench の時は下げない)。
 // 以前は等倍の画面でも2倍で描いていたが(ハイライトの縁のギザギザ対策)、描画ピクセル数が4倍になり重すぎたのでやめた
-renderer.setPixelRatio(devicePixelRatio)
+const resolution = createResolution(renderer, {
+  auto: !benchEnabled,
+  onChange: () => (display.pixelRatio = renderer.getPixelRatio()), // GUI の表示を合わせる
+})
 // 明るすぎる映り込みが真っ白に飛ばないよう圧縮する。ACES Filmic は暗部が締まり、宝石の色とハイライトが際立つ
 // (Neutral・AgX と見比べてユーザーが選んだ。GUI の toneMapping で切り替えられる)
 renderer.toneMapping = THREE.ACESFilmicToneMapping
 // three.js の ACES は内部で露出を 1/0.6 (約1.67倍) にしているので、0.6 で打ち消して Neutral の頃に近い明るさにする。
 // 1.0 のままだと全体が約35%明るくなり、背景の中間調とブルーム・光条が持ち上がってぎらついた (暗い中に光だけが浮かぶ方が品が良い)
 renderer.toneMappingExposure = 0.6
-await renderer.init()
+try {
+  await renderer.init()
+} catch (error) {
+  // WebGPU も WebGL2 も使えない端末 (読み込み直しても変わらないので、押しても何もしない)
+  loader.fail(error, 'WebGPU / WebGL2 is not available', false)
+  throw error
+}
+loader.complete('gpu')
 app.appendChild(renderer.domElement)
 
 const controls = new OrbitControls(camera, renderer.domElement)
@@ -61,7 +89,8 @@ const PAN_HEIGHT = 2 // 床からの高さ
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 1.5))
 const dir = new THREE.DirectionalLight(0xffffff, 2)
-// キーライト。高さ(仰角)18°、方位59°(+x と +z の間)から照らす。Caustics の light elevation / light azimuth で動かせる
+// キーライト。夜は高さ(仰角)18°、方位59°(+x と +z の間)から照らす。朝・昼・夕方は時刻で少しずれる (timeOfDay.ts)。
+// 夜の向きは GUI の Time の light elevation / light azimuth で動かせる
 dir.position.setFromSphericalCoords(10, THREE.MathUtils.degToRad(90 - 18), THREE.MathUtils.degToRad(59))
 scene.add(dir)
 // コースティクス (caustics.ts)。この平行光源が宝石を通って床に落とす光の模様
@@ -80,11 +109,15 @@ const viewZ = scenePass.getViewZNode()
 // focalLength が小さいと散らばった宝石の大半が甘くなる。宝石の散らばり(±2程度)に合わせて広めにしている
 const focusDistance = uniform(5.0)
 const focalLength = uniform(5.0)
-const bokehScale = uniform(6.0) // ピントの外はしっかりぼかす (ユーザーの指定。以前は3)
+// ピントの外はしっかりぼかす (ユーザーの指定。以前は3)。ボケの大きさは描いている画像の画素が単位なので、
+// 動いている間 (描画倍率が低い) は倍率の比を掛け、止まっている間と同じ見かけの大きさにする (アニメーションループ)
+const bokeh = { scale: 6 }
+const bokehScale = uniform(bokeh.scale)
 // as: @types/three 0.185ではdof()/bloom()の戻り型がTempNode(ジェネリクス未指定)のままで
 // fluent APIを持つNode<'vec4'>になっていないため、アサーションで補正する
 const dofNode = dof(scenePassColor, viewZ, focusDistance, focalLength, bokehScale)
 const dofPass = dofNode as unknown as THREE.Node<'vec4'>
+if (quality.dofScale !== 0.5) setBokehResolution(dofNode, quality.dofScale)
 // レンズとフィルムの仕上げ (lens.ts)。ボケの形 (絞り羽根) は DoF の中のサンプルの並びを差し替える
 const lens = createLens(gui)
 lens.shapeBokeh(dofNode)
@@ -105,16 +138,51 @@ pipeline.outputColorTransform = false
 // DoF のオン・オフ (HUD から切り替える)。切ると DoF がつなぎ方から外れて、その計算も止まる
 // (ブルーム・光条より先に DoF が描かれるよう、DoF を式の先頭に置く)
 let dofEnabled = true
-function setDof(value: boolean) {
-  dofEnabled = value
-  effectInput.value = value ? dofTexture : scenePassColor.value
-  const base: THREE.Node<'vec4'> = value ? dofPass : scenePassColor
+let glowEnabled = true // ブルームと光条 (HUD の Glow で切り替える。?bench の負荷の内訳でも外して測る)
+function buildOutput() {
+  effectInput.value = dofEnabled ? dofTexture : scenePassColor.value
+  const base: THREE.Node<'vec4'> = dofEnabled ? dofPass : scenePassColor
   // シャープ・色収差 → ブルームと光条を足す → 周辺減光 → トーンマッピング → フィルムの粒子
-  const hdr = lens.darkenEdges(lens.optics(base, effectInput).add(effects))
+  const optics = lens.optics(base, effectInput)
+  const hdr = lens.darkenEdges(glowEnabled ? optics.add(effects) : optics)
   pipeline.outputNode = lens.addGrain(renderOutput(hdr))
   pipeline.needsUpdate = true
 }
-setDof(true)
+function setDof(value: boolean) {
+  dofEnabled = value
+  buildOutput()
+}
+function setGlow(value: boolean) {
+  glowEnabled = value
+  buildOutput()
+}
+buildOutput()
+
+// DoF のボケを計算する解像度を変える (DepthOfFieldNode は半分で固定なので、setSize を差し替える)。
+// サンプルの間隔 (_invSize) は元の画像の画素のままなので、ボケの大きさは変わらず、ボケの画像が粗くなるだけ。
+// 中身は DepthOfFieldNode.setSize (three r185) の写しで、ボケをぼかす4枚の画像の大きさだけが違う
+// (元の setSize を呼んでから直すと、毎フレーム大きさが2回変わって画像を作り直してしまうため、丸ごと置き換える)
+type DofInternals = {
+  setSize(width: number, height: number): void
+  _invSize: { value: THREE.Vector2 }
+  _CoCRT: THREE.RenderTarget
+  _compositeRT: THREE.RenderTarget
+  _CoCBlurredRT: THREE.RenderTarget
+  _blur64RT: THREE.RenderTarget
+  _blur16NearRT: THREE.RenderTarget
+  _blur16FarRT: THREE.RenderTarget
+}
+function setBokehResolution(dofNode: unknown, scale: number) {
+  const node = dofNode as DofInternals
+  node.setSize = (width, height) => {
+    node._invSize.value.set(1 / width, 1 / height)
+    node._CoCRT.setSize(width, height)
+    node._compositeRT.setSize(width, height)
+    const w = Math.max(1, Math.round(width * scale))
+    const h = Math.max(1, Math.round(height * scale))
+    for (const target of [node._CoCBlurredRT, node._blur64RT, node._blur16NearRT, node._blur16FarRT]) target.setSize(w, h)
+  }
+}
 
 // --- GUI ---
 const dofFolder = gui.addFolder('DoF')
@@ -124,7 +192,7 @@ const autofocusController = dofFolder.add(focusParams, 'autofocus')
 const focusController = dofFolder.add(focusDistance, 'value', 0.1, 20).name('focusDistance').listen().disable()
 autofocusController.onChange((value: boolean) => focusController.enable(!value))
 dofFolder.add(focalLength, 'value', 0.1, 10).name('focalLength')
-dofFolder.add(bokehScale, 'value', 0, 10).name('bokehScale')
+dofFolder.add(bokeh, 'scale', 0, 10).name('bokehScale') // 止まっている間の描画倍率での大きさ
 const bloomFolder = gui.addFolder('Bloom')
 bloomFolder.add(bloomNode.strength, 'value', 0, 2).name('strength')
 bloomFolder.add(bloomNode.radius, 'value', 0, 1).name('radius')
@@ -142,9 +210,13 @@ const stage = createStage(scene, gui, caustics.floorLight)
 // 暗い撮影スタジオに照明を数灯置いた環境を作り、映り込みと宝石の中を通る光に使う (画面の背景は stage.ts のまま)
 const studio = createStudio(renderer, dir, caustics.lightSize, gui)
 scene.environment = studio.texture
+// --- 時刻による光の移ろい (timeOfDay.ts) ---
+// 見る人の端末の時刻で、キーライトの色と向き・スタジオの窓・背景の色味を少しだけ変える (夜は上の設定のまま)
+const timeOfDay = createTimeOfDay(dir, { setWindow: studio.setWindow, setBackgroundTint: stage.setBackgroundTint }, gui)
 // 画質と負荷の比較用 (2倍で描画ピクセル数は等倍の4倍)
-const display = { pixelRatio: renderer.getPixelRatio() }
-gui.add(display, 'pixelRatio', 1, 3, 0.5).onChange((value: number) => renderer.setPixelRatio(value))
+const display = { pixelRatio: renderer.getPixelRatio(), fps: quality.fps }
+gui.add(display, 'pixelRatio', 0.5, 3, 0.25).listen().onChange((value: number) => resolution.set(value)) // 動かすと自動調整は止まる
+gui.add(display, 'fps', [60, 30]).name('fps limit') // 動いている間に描く回数の上限
 
 // --- 宝石マテリアル ---
 // GLBのマテリアルはローダーが MeshPhysicalMaterial として作る。TSLノードを差し込めるよう
@@ -316,9 +388,12 @@ function applyGemMaterial(root: THREE.Object3D): THREE.Mesh[] {
 }
 
 // --- 落下 (physics.ts) ---
-// GLBの落下アニメーションは最初の姿勢(空中)を取り出すのにだけ使い、start ボタンで物理シミュレーションで落とす
+// GLB の宝石は最初の姿勢(空中)で置いてあり、そこから物理シミュレーションで落とす。
+// 幕が上がったらすぐ1回落とし、その後は start ボタンで何度でもやり直せる (一番下)
 // (Clockはr183で非推奨になったのでTimerを使う)
-let physics: Awaited<ReturnType<typeof createGemPhysics>> | undefined
+let physics: GemPhysics | undefined
+// 読み込めた物理は、幕が上がるまで physics に入れずに取っておく (幕の裏で Space キーの start が効かないように)
+let preparedPhysics: GemPhysics | undefined
 const timer = new THREE.Timer()
 timer.connect(document) // タブ非表示中は時間を進めない
 const gems: THREE.Mesh[] = []
@@ -334,19 +409,23 @@ animationFolder.add(playback, 'speed', 0, 2) // 0.2 などにするとスロー�
 
 // --- HUD (hud.ts) ---
 // 見る人が触る項目は画面下の HUD に置き、作品の一部として見せる。
-// 調整用の lil-gui は見た目の邪魔にならないよう普段は隠し、G キーで出し入れする
-let tuningVisible = false
+// 調整用の lil-gui は見た目の邪魔にならないよう普段は隠し、G キーで出し入れする (?debug の時は最初から出す)
+let tuningVisible = debugEnabled
 gui.show(tuningVisible)
+if (debugEnabled) gui.close() // スマホでは開くと画面の大半を覆うので、畳んだ状態で出す
 const hud = createHud({
   toggles: [
     { label: 'DoF', detail: 'Depth of field', get: () => dofEnabled, set: setDof },
     { label: 'Reflection', detail: 'Floor mirror', get: stage.reflection, set: stage.setReflection },
-    { label: 'Auto camera', detail: 'Camera path', get: () => playback.autoCamera, set: (value) => (playback.autoCamera = value) },
+    { label: 'Glow', detail: 'Bloom + streak', get: () => glowEnabled, set: setGlow },
     { label: 'Caustics', detail: 'Traced light', get: caustics.isEnabled, set: caustics.setEnabled, available: caustics.supported },
   ],
+  camera: { label: 'Auto camera', get: () => playback.autoCamera, set: (value) => (playback.autoCamera = value) }, // 右上に離して置く
   start: () => physics?.start(), // 最初の姿勢に戻して落とす (何度でもやり直せる)
   changed: () => invalidate(),
   status: () => physics && { running: physics.running, settled: physics.settled },
+  ready: loader.ready, // 幕が上がり始めたら登場する
+  clock: () => timeOfDay.display, // 左上の時刻と時間帯の印
   shortcuts: [
     {
       key: 'g',
@@ -364,23 +443,17 @@ new GLTFLoader().load(
   (gltf) => {
     scene.add(gltf.scene)
     gems.push(...applyGemMaterial(gltf.scene))
-    // モデル全体が収まるようにカメラの距離を決める
+    // モデル全体が収まるようにカメラの距離を決める (自動カメラの間は毎フレーム上書きされる)
     const box = new THREE.Box3().setFromObject(gltf.scene)
-
-    // GLB内のアニメーション (gem_drop_x8 は Gem_0〜7 ごとに1クリップ) は再生せず、
-    // 最初の姿勢(空中)を取り出すのと、着地後の姿勢をカメラ合わせの範囲に含めるのにだけ使う
-    if (gltf.animations.length > 0) {
-      const mixer = new THREE.AnimationMixer(gltf.scene)
-      for (const clip of gltf.animations) mixer.clipAction(clip).play()
-      // (duration ちょうどだとループで0に巻き戻るので僅かに手前)
-      const duration = Math.max(...gltf.animations.map((clip) => clip.duration))
-      mixer.setTime(duration * 0.999)
-      box.union(new THREE.Box3().setFromObject(gltf.scene))
-      mixer.setTime(0)
-    }
     // 物理で位置と向きを直接書き換えるので、宝石をシーン直下に移す (見た目の位置は変わらない)
     for (const gem of gems) scene.attach(gem)
-    createGemPhysics(gems).then((result) => (physics = result))
+    loader.complete('model')
+    physicsModule
+      .then(({ createGemPhysics }) => {
+        preparedPhysics = createGemPhysics(gems)
+        loader.complete('physics')
+      })
+      .catch((error) => loader.fail(error))
 
     // 注視点(カメラが見る点・ドラッグで回す中心)は原点。DoFのピントも原点に合わせる
     const size = box.getSize(new THREE.Vector3()).length()
@@ -390,12 +463,7 @@ new GLTFLoader().load(
     focusController.updateDisplay()
   },
   undefined,
-  () => {
-    const msg = document.createElement('div')
-    msg.className = 'notice'
-    msg.textContent = `${MODEL_URL} が見つかりません。GLBを web/public/ に置いてください。`
-    app.appendChild(msg)
-  },
+  (error) => loader.fail(new Error(`${MODEL_URL} を読み込めませんでした。GLBを web/public/ に置いてください。`, { cause: error })),
 )
 
 // --- 宝石を突く (poke.ts) ---
@@ -425,11 +493,12 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight
   camera.updateProjectionMatrix()
   renderer.setSize(innerWidth, innerHeight)
+  resolution.fit() // スマホは画面の大きさで倍率が変わる (向きを変えた時など)
   invalidate()
 })
 
 // --- 描画の省略 ---
-// 描き直すのは、カメラか宝石が動いた時 (hasMoved) と、invalidate() が呼ばれた時だけ:
+// 描き直すのは、前に描いた時から画面上で見て分かる変化があった時 (visibleChange) と、invalidate() が呼ばれた時だけ:
 // GUI の値の変更・HUD の操作・画面サイズの変更・ファイルの読み込み完了 (床のラフネスマップなど、後から届く物)
 let needsRender = true
 function invalidate() {
@@ -438,14 +507,48 @@ function invalidate() {
 gui.onChange(invalidate)
 THREE.DefaultLoadingManager.onProgress = invalidate
 
-// 位置・向きが前回呼んだ時から変わったか
-const lastMatrices = new Map<THREE.Object3D, THREE.Matrix4>()
-function hasMoved(object: THREE.Object3D) {
-  object.updateMatrixWorld()
-  const last = lastMatrices.get(object)
-  if (last?.equals(object.matrixWorld)) return false
-  lastMatrices.set(object, (last ?? new THREE.Matrix4()).copy(object.matrixWorld))
-  return true
+// 以前は位置が少しでも変われば描き直していた。そのため、指を離した後のカメラの慣性 (目に見えない細かさの動きが約10秒続く。
+// 0.5px 以上動くのは最初の約0.5秒だけ) や、止まりかけの宝石の細かい揺れの間も、ずっと全部を描き直していた (スマホが熱を持った)。
+// 今は前に描いた時の位置・向き・ピントと比べ、画面上の動きが VISIBLE_SHIFT に満たなければ描かない。
+// 比べる相手は「前に描いた時」なので、ゆっくりした動きも積み重なれば描かれる (取り残されない)
+const VISIBLE_SHIFT = 0.5 // 描き直す動きの大きさ (動いている間の描画倍率での画素。resolution.ts)
+const FOCUS_SHIFT = 0.004 // ピントの移動が focalLength のこの割合を超えたら描き直す (ピントの内と外の混ぜ具合が約1%変わる)
+type Pose = { position: THREE.Vector3; quaternion: THREE.Quaternion }
+const renderedPoses = new Map<THREE.Object3D, Pose>()
+let renderedFocus = focusDistance.value
+
+// 前に描いた時から、見て分かる変化があったか
+function visibleChange() {
+  if (Math.abs(focusDistance.value - renderedFocus) > FOCUS_SHIFT * focalLength.value) return true
+  // 画面の中央で VISIBLE_SHIFT 画素に当たる角度 (ラジアン)。画素は動いている間の倍率で数える
+  // (止まってくっきり描いた後に判定が細かくならないように)
+  const bufferHeight = innerHeight * resolution.motionRatio()
+  const minAngle = (VISIBLE_SHIFT / bufferHeight) * 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))
+  // 動いた長さ (ワールド単位) を、その距離から見た角度に直して比べる
+  const shifted = (object: THREE.Object3D, radius: number, distance: number) => {
+    const pose = renderedPoses.get(object)
+    if (!pose) return true
+    const shift = object.position.distanceTo(pose.position) + object.quaternion.angleTo(pose.quaternion) * radius
+    return shift / distance > minAngle
+  }
+  // カメラ: 向きが変わると画面全体が同じ角度だけずれる。位置が変わると近い物ほど大きくずれるので、一番近い宝石で測る
+  let nearest = camera.position.distanceTo(controls.target)
+  for (const gem of gems) nearest = Math.min(nearest, gem.position.distanceTo(camera.position))
+  const cameraPose = renderedPoses.get(camera)
+  if (!cameraPose || camera.quaternion.angleTo(cameraPose.quaternion) + camera.position.distanceTo(cameraPose.position) / nearest > minAngle) return true
+  // 宝石: 中心の移動と、回転で縁が動く長さ
+  return gems.some((gem) => shifted(gem, (gem.geometry.boundingSphere?.radius ?? 1) * gem.scale.x, gem.position.distanceTo(camera.position)))
+}
+
+// 描いた時の位置・向き・ピントを覚えておく (次の visibleChange の比べる相手)
+function rememberRendered() {
+  for (const object of [camera, ...gems]) {
+    const pose = renderedPoses.get(object) ?? { position: new THREE.Vector3(), quaternion: new THREE.Quaternion() }
+    pose.position.copy(object.position)
+    pose.quaternion.copy(object.quaternion)
+    renderedPoses.set(object, pose)
+  }
+  renderedFocus = focusDistance.value
 }
 
 // --- ピント (DoF) ---
@@ -486,9 +589,8 @@ function updateFocus(delta: number) {
   if (target === undefined) return
   const current = focusDistance.value
   const next = current + (target - current) * (1 - Math.exp(-FOCUS_SPEED * delta))
+  // ピントが動いている間は、カメラと宝石が止まっていても描き直す (見て分かるほど動いたかは visibleChange で判断する)
   focusDistance.value = next
-  // ピントが動いている間は、カメラと宝石が止まっていても描き直す (描画の省略で止まらないように)
-  if (Math.abs(next - current) > 1e-4) invalidate()
 }
 
 // 画面の中央に近い宝石ほど重く見た、宝石の深度の平均
@@ -508,19 +610,60 @@ function averageFocus() {
   return total > 0 ? weighted / total : undefined
 }
 
-// 120Hz の画面でも 60fps で回す (動いている間の GPU の仕事量を半分にする)。
+// 120Hz の画面でも 60fps で回す (動いている間の GPU の仕事量を半分にする。上限は quality.ts と GUI の fps limit)。
 // 間隔の揺れで1コマおきに落ちないよう1ms手前から許し、超えた分は次の間隔に持ち越す
-const FRAME_INTERVAL = 1000 / 60
 let lastFrame = 0
+const STILL_DELAY = 300 // 動きが止まってから、くっきり描き直すまで (ms。ゆっくり動かしている間に切り替わらないように)
+let lastMotion = 0 // 最後に動いていた時刻
+// くっきり描き直す時に、直前の軽い絵から溶かすように切り替える (crossfade.ts)
+const crossfade = createCrossfade(renderer.domElement, app, debugEnabled)
+const timing = createFrameTiming(renderer) // 描いたコマの CPU・GPU の時間 (描画倍率の自動調整と確認用の表示が読む)
+const debugOverlay = createDebugOverlay(renderer, timing, () => [resolution.describe(), crossfade.result].filter(Boolean).join(' '))
+
+// --- 負荷の内訳 (?bench。debug.ts) ---
+// 落下が終わってカメラも止まったら (自動カメラは落とし始めてから10秒で止まる)、効果を1つずつ外して GPU の時間を測る。
+// 外すのは1項目ずつで、測り終えたら元に戻す (差がそのままその効果の重さになる)。
+// -gems は宝石の描画 (内部反射シェーダー。床の映り込みの中の分も含む) を外す。コースティクスの計算は残る
+const BENCH_START = 10.5 // 落とし始めてからの秒数
+let benchStarted = false
+const offStep = (label: string, get: () => boolean, set: (value: boolean) => void): BenchStep => {
+  let before = false
+  return {
+    label,
+    apply: () => {
+      before = get()
+      set(false)
+    },
+    revert: () => set(before),
+  }
+}
+const baseline: BenchStep = { label: 'all on', apply() {}, revert() {} }
+const benchSteps: BenchStep[] = [
+  baseline,
+  offStep('-caustics', caustics.isEnabled, caustics.setEnabled),
+  offStep('-reflection', stage.reflection, stage.setReflection),
+  offStep('-DoF', () => dofEnabled, setDof),
+  offStep('-bloom/star', () => glowEnabled, setGlow),
+  offStep('-gems', () => gems[0]?.visible ?? false, (value) => gems.forEach((gem) => (gem.visible = value))),
+  // 描画倍率を 0.75 倍にした時 (描く画素の数は約56%)。解像度がどれだけ効くかを見る
+  { label: 'res ×0.75', apply: () => renderer.setPixelRatio(display.pixelRatio * 0.75), revert: () => renderer.setPixelRatio(display.pixelRatio) },
+  { ...baseline }, // 最後にもう一度 (最初と比べて、熱で遅くなっていないかを見る)
+]
 
 renderer.setAnimationLoop((timestamp) => {
+  const interval = 1000 / display.fps
   const elapsed = timestamp - lastFrame
-  if (elapsed < FRAME_INTERVAL - 1) return
-  lastFrame = timestamp - (elapsed >= FRAME_INTERVAL ? elapsed % FRAME_INTERVAL : 0)
+  if (elapsed < interval - 1) return
+  lastFrame = timestamp - (elapsed >= interval ? elapsed % interval : 0)
+  const frameStart = performance.now()
 
   timer.update(timestamp)
   const delta = timer.getDelta()
   physics?.update(delta * playback.speed)
+  if (benchEnabled && !benchStarted && physics && physics.time > BENCH_START) {
+    benchStarted = true
+    debugOverlay.runBench(benchSteps)
+  }
   if (playback.autoCamera) {
     cameraPath(physics?.time ?? 0, camera.position)
     // キーフレームを変えても床すれすれまで下がらないように (手動操作と同じ仰角の下限)
@@ -539,15 +682,51 @@ renderer.setAnimationLoop((timestamp) => {
     camera.position.add(panCorrection)
   }
   if (focusParams.autofocus && dofEnabled) updateFocus(delta)
+  if (timeOfDay.update()) invalidate() // 光を変えるのは、時計の分が変わった時と GUI の Time を動かした時だけ
   hud.update()
+  resolution.update(timing) // 動いている間に重すぎる状態が続いたら、動いている間の描画倍率を下げる
 
-  // 前に描いた時から何も変わっていなければ描かない (宝石が止まって眺めているだけの間、GPU をほぼ休ませる)。
-  // 画面には最後に描いた絵が残る
-  const moved = [camera, ...gems].map(hasMoved).includes(true) // 全部の前回の値を更新するので、途中で打ち切らず map で回す
-  if (!moved && !needsRender) return
+  // 前に描いた時から見て分かる変化が無ければ描かない (宝石が止まって眺めているだけの間、GPU をほぼ休ませる)。
+  // 画面には最後に描いた絵が残る。?bench の時は、端末の余力を測るため毎コマ描く (コースティクスも落下中と同じく毎コマ計算する)
+  // 動いている間は軽い描画倍率で描き、動きが止まって STILL_DELAY たったら、止まっている間の倍率 (くっきり) で1回描き直す
+  // (resolution.ts)。落とし始めるまでは切り替えない (幕の裏で細かく描き直すと、落ち始めに倍率を戻す引っかかりが入るため)
+  const now = performance.now()
+  const moved = benchEnabled || visibleChange()
+  if (moved) lastMotion = now
+  const quiet = !moved && physics !== undefined && now - lastMotion > STILL_DELAY
+  const settling = quiet && !resolution.still // 止まってくっきり描き直すコマ
+  if (!moved && !needsRender && !settling) return
   needsRender = false
-  studio.update()
-  caustics.update()
-  lens.update()
-  pipeline.render()
+  if (moved) crossfade.cancel() // 溶かしている途中で動き出したら、重ねた絵をすぐ消す
+  if (settling) {
+    // 画面に出ている軽い絵を、同じ状態でもう一度描いて写し取り、上に重ねる (粒子の模様も変えないので同じ絵になる)
+    renderFrame(frameStart, false)
+    crossfade.capture()
+  }
+  resolution.setStill(quiet) // 倍率を変えたら画面の中身が消えるので、このコマで必ず描く
+  renderFrame(frameStart)
+  // 重ねた軽い絵を徐々に透明にして、くっきりした絵へ溶かす
+  if (settling) crossfade.fadeOut()
 })
+
+// 1コマ描く。grain: フィルムの粒子の模様を変えるか
+function renderFrame(frameStart: number, grain = true) {
+  bokehScale.value = bokeh.scale * resolution.pixelScale()
+  rememberRendered()
+  studio.update()
+  caustics.update(benchEnabled)
+  if (grain) lens.update()
+  pipeline.render()
+  timing.record(frameStart)
+  // 宝石を1回描き終えたら、最後の条件がそろう (最初の描画はシェーダーの組み立てで時間がかかるので、幕の裏で済ませる。
+  // その前に落とし始めると、落ち始めがかくつく)
+  if (gems.length > 0) loader.complete('firstFrame')
+}
+
+// 条件がそろったら幕を上げ、上げ終わったら落とし始める
+loader.ready
+  .then(loader.hide)
+  .then(() => {
+    physics = preparedPhysics
+    physics?.start()
+  })

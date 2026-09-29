@@ -1,0 +1,5 @@
+# Vercel CLI は .gitignore を見ないので、上げない物をここに書く (node_modules と .git は元から上がらない)
+# 開発用HTTPSの証明書と秘密鍵
+certs
+# 手元でビルドした物 (Vercel 側でビルドし直す)
+dist

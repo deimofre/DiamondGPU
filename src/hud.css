@@ -520,6 +520,148 @@
   animation-delay: 140ms;
 }
 
+/* --- 左上の時刻 (hud.ts の clock。時刻と光は timeOfDay.ts) ---
+ * さりげなく置く: 細い線の印と、小さな等幅の数字だけ。間を髪の毛ほどの縦線で区切る */
+
+.hud-clock {
+  position: fixed;
+  top: max(20px, env(safe-area-inset-top));
+  left: max(20px, env(safe-area-inset-left));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud.is-ready .hud-clock {
+  animation: hud-fade 1.2s ease 600ms backwards;
+}
+
+.hud-clock__frame {
+  position: relative;
+  width: 20px;
+  height: 20px;
+}
+
+.hud-clock__mark {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  fill: none;
+  stroke: rgb(var(--hud-gofun) / 0.86);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* ごく弱い光彩 (後ろが明るい所でも線が沈まないように、影も少し敷く) */
+  filter: drop-shadow(0 0 3px rgb(var(--hud-gofun) / 0.3)) drop-shadow(0 0 6px rgb(0 0 0 / 0.5));
+}
+
+.hud-clock__mark * {
+  vector-effect: non-scaling-stroke;
+}
+
+/* 4つの印を重ねておき、今の時間帯のものだけ見せる。替わる時は、前の印が薄れながら次の印が少し回って現れる */
+.hud-clock__mark [data-phase] {
+  opacity: 0;
+  transform: rotate(-24deg) scale(0.86);
+  transform-origin: 12px 12px;
+  transition:
+    opacity 1.2s ease,
+    transform 1.6s var(--hud-ease);
+}
+
+.hud-clock[data-phase='morning'] [data-phase='morning'],
+.hud-clock[data-phase='day'] [data-phase='day'],
+.hud-clock[data-phase='evening'] [data-phase='evening'],
+.hud-clock[data-phase='night'] [data-phase='night'] {
+  opacity: 1;
+  transform: none;
+}
+
+.hud-clock__time {
+  padding-left: 8px;
+  border-left: 1px solid var(--hud-line);
+  font: 500 10px/12px var(--hud-mono);
+  letter-spacing: 0.18em;
+  color: rgb(var(--hud-gofun) / 0.78);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- 右上の自動カメラ (hud.ts の camera) ---
+ * オプション扱いなので、左上の時刻と鏡写しに同じくらい小さく置く: 文字 | 印。
+ * ON は印のカメラの点が灯り、OFF (ドラッグで手動に切り替わった時など) は全体を薄くして点を輪郭だけにする */
+
+.hud-camera {
+  position: fixed;
+  top: max(20px, env(safe-area-inset-top));
+  right: max(20px, env(safe-area-inset-right));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 押せる範囲だけ広げる (見た目の位置は時刻とそろえたまま) */
+  padding: 8px;
+  margin: -8px;
+  transition: opacity 240ms ease;
+}
+
+.hud-camera[aria-pressed='false'] {
+  opacity: 0.45;
+}
+
+.hud.is-ready .hud-camera {
+  animation: hud-fade 1.2s ease 600ms backwards;
+}
+
+.hud-camera__label {
+  padding-right: 8px;
+  border-right: 1px solid var(--hud-line);
+  font: 500 10px/12px var(--hud-mono);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgb(var(--hud-gofun) / 0.78);
+  transition: color 240ms ease;
+}
+
+/* 線の太さ・光彩は時刻の印とそろえる */
+.hud-camera__mark {
+  width: 20px;
+  height: 20px;
+  overflow: visible;
+  fill: none;
+  stroke: rgb(var(--hud-gofun) / 0.86);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 3px rgb(var(--hud-gofun) / 0.3)) drop-shadow(0 0 6px rgb(0 0 0 / 0.5));
+}
+
+.hud-camera__mark * {
+  vector-effect: non-scaling-stroke;
+}
+
+.hud-camera__eye {
+  fill: rgb(var(--hud-sumi));
+  transition: fill 240ms ease;
+}
+
+.hud-camera[aria-pressed='true'] .hud-camera__eye {
+  fill: rgb(var(--hud-gofun));
+}
+
+.hud-camera:focus-visible .hud-camera__label {
+  color: var(--hud-fg);
+}
+
+@media (hover: hover) {
+  .hud-camera:hover {
+    opacity: 1;
+  }
+
+  .hud-camera:hover .hud-camera__label {
+    color: var(--hud-fg);
+  }
+}
+
 /* --- キーの案内 (デスクトップだけ) --- */
 
 .hud-hint {
@@ -696,6 +838,40 @@
     font-size: 8.5px;
     letter-spacing: 0.2em;
     margin-right: -0.2em;
+  }
+
+  .hud-clock {
+    top: max(16px, env(safe-area-inset-top));
+    left: max(16px, env(safe-area-inset-left));
+    gap: 6px;
+  }
+
+  .hud-clock__frame {
+    width: 16px;
+    height: 16px;
+  }
+
+  .hud-clock__time {
+    padding-left: 6px;
+    font-size: 9px;
+    letter-spacing: 0.14em;
+  }
+
+  .hud-camera {
+    top: max(16px, env(safe-area-inset-top));
+    right: max(16px, env(safe-area-inset-right));
+    gap: 6px;
+  }
+
+  .hud-camera__mark {
+    width: 16px;
+    height: 16px;
+  }
+
+  .hud-camera__label {
+    padding-right: 6px;
+    font-size: 9px;
+    letter-spacing: 0.14em;
   }
 }
 
