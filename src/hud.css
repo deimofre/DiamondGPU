@@ -133,8 +133,9 @@
     var(--hud-grain) 0 0 / 128px 128px,
     var(--hud-glass-tint);
   background-color: rgb(var(--hud-sumi) / 0.3);
-  backdrop-filter: var(--hud-glass);
+  /* -webkit- を先に書く (逆の順だと、本番のビルドの CSS 圧縮 (Lightning CSS) が標準の方を消し、Chrome でぼけなくなる) */
   -webkit-backdrop-filter: var(--hud-glass);
+  backdrop-filter: var(--hud-glass);
   /* ガラスの縁: 上端だけ光を受けて明るく、周りは髪の毛ほどの線。下に薄い影を落として少し浮かせる */
   box-shadow:
     inset 0 1px 0 rgb(var(--hud-gofun) / 0.1),
@@ -318,8 +319,8 @@
   inset: 0;
   background: var(--hud-grain) 0 0 / 128px 128px, var(--hud-glass-tint);
   background-color: rgb(var(--hud-sumi) / 0.3);
-  backdrop-filter: var(--hud-glass);
   -webkit-backdrop-filter: var(--hud-glass);
+  backdrop-filter: var(--hud-glass);
 }
 
 /* 光彩は線画に付ける (frame に filter を掛けるとガラスが後ろを透かせなくなる) */
@@ -476,6 +477,18 @@
     opacity: 1;
   }
 
+  .hud-info:hover {
+    opacity: 1;
+  }
+
+  .hud-notes__close:hover {
+    color: var(--hud-fg);
+  }
+
+  .hud-notes__try a:hover {
+    border-bottom-color: var(--hud-line-strong);
+  }
+
   .hud-launch:hover .hud-launch__gem {
     filter: drop-shadow(0 0 6px rgb(var(--hud-gofun) / 0.35));
   }
@@ -623,8 +636,10 @@
   transition: color 240ms ease;
 }
 
-/* 線の太さ・光彩は時刻の印とそろえる */
-.hud-camera__mark {
+/* 線の太さ・光彩は時刻の印とそろえる (下の (i) も同じ) */
+.hud-camera__mark,
+.hud-info__mark {
+  display: block;
   width: 20px;
   height: 20px;
   overflow: visible;
@@ -635,7 +650,8 @@
   filter: drop-shadow(0 0 3px rgb(var(--hud-gofun) / 0.3)) drop-shadow(0 0 6px rgb(0 0 0 / 0.5));
 }
 
-.hud-camera__mark * {
+.hud-camera__mark *,
+.hud-info__mark * {
   vector-effect: non-scaling-stroke;
 }
 
@@ -660,6 +676,240 @@
   .hud-camera:hover .hud-camera__label {
     color: var(--hud-fg);
   }
+}
+
+/* --- 右上の (i) と技術ノート (hud.ts の notes。文章は notes.ts) ---
+ * (i) は自動カメラの印の真下に、同じ線で置く。
+ * ノートは下のタイルと同じすりガラスの板 (「」の括弧つき) を画面の中央に出す。後ろの作品は暗く沈め、触れなくする (<dialog> の showModal) */
+
+.hud-info {
+  position: fixed;
+  /* 自動カメラの行 (印 20px) の下に 12px 空ける */
+  top: calc(max(20px, env(safe-area-inset-top)) + 32px);
+  right: max(20px, env(safe-area-inset-right));
+  padding: 8px;
+  margin: -8px;
+  opacity: 0.78;
+  transition: opacity 240ms ease;
+}
+
+.hud.is-ready .hud-info {
+  animation: hud-fade 1.2s ease 700ms backwards;
+}
+
+.hud-info__mark {
+  stroke-linecap: round;
+}
+
+.hud-info__dot {
+  fill: rgb(var(--hud-gofun) / 0.86);
+  stroke: none;
+}
+
+.hud-info:focus-visible {
+  opacity: 1;
+}
+
+.hud-notes {
+  width: min(560px, calc(100vw - 32px));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--hud-fg);
+  overflow: visible;
+  pointer-events: auto; /* .hud は下のキャンバスに操作を通すため none にしている */
+  text-shadow: none;
+}
+
+/* ::backdrop は .hud の変数を受け継がない場合があるので、色は直に書く (墨) */
+.hud-notes::backdrop {
+  background: rgb(12 12 14 / 0.5);
+}
+
+.hud-notes[open]::backdrop {
+  animation: hud-fade 400ms ease;
+}
+
+.hud-notes__panel {
+  --hud-corner: var(--hud-line);
+  --hud-bracket: 16px;
+  display: flex;
+  flex-direction: column;
+  max-height: min(720px, calc(100dvh - 64px));
+  background:
+    /* 「 */
+    linear-gradient(var(--hud-corner), var(--hud-corner)) left top / var(--hud-bracket) 1px no-repeat,
+    linear-gradient(var(--hud-corner), var(--hud-corner)) left top / 1px var(--hud-bracket) no-repeat,
+    /* 」 */
+    linear-gradient(var(--hud-corner), var(--hud-corner)) right bottom / var(--hud-bracket) 1px no-repeat,
+    linear-gradient(var(--hud-corner), var(--hud-corner)) right bottom / 1px var(--hud-bracket) no-repeat,
+    var(--hud-grain) 0 0 / 128px 128px,
+    var(--hud-glass-tint);
+  background-color: rgb(var(--hud-sumi) / 0.5);
+  -webkit-backdrop-filter: var(--hud-glass);
+  backdrop-filter: var(--hud-glass);
+  box-shadow:
+    inset 0 1px 0 rgb(var(--hud-gofun) / 0.1),
+    inset 0 0 0 1px rgb(var(--hud-gofun) / 0.045),
+    0 24px 64px -24px rgb(0 0 0 / 0.8);
+}
+
+.hud-notes[open] .hud-notes__panel {
+  animation: hud-rise 600ms var(--hud-ease);
+}
+
+.hud-notes__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 12px 4px 32px;
+}
+
+.hud-notes__title {
+  margin: 0;
+  font: 400 11px/12px var(--hud-display);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--hud-muted);
+}
+
+.hud-notes__close {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  color: rgb(var(--hud-gofun) / 0.6);
+  transition: color 240ms ease;
+}
+
+.hud-notes__close svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+
+.hud-notes__close:focus-visible {
+  color: var(--hud-fg);
+}
+
+/* 本文: 見たい人だけが開くページなので、読みやすさより品を取る (ユーザーの指定)。
+ * 明朝体を、約物と仮名を詰めて (palt) から字間を少し開け、色は一段沈める。1行38字前後。
+ * 技術者が引用できるよう、文字は選べるようにする */
+.hud-notes__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y; /* html・body は touch-action: none なので、ここだけ指でスクロールできるようにする */
+  padding: 8px 32px 32px;
+  font: 400 13px/2.1 'Hiragino Mincho ProN', 'Hiragino Mincho Pro', 'Yu Mincho', YuMincho, 'Noto Serif JP', 'Noto Serif CJK JP', serif;
+  font-feature-settings: 'palt';
+  letter-spacing: 0.1em;
+  line-break: strict;
+  text-wrap: pretty; /* 段落の最後の行に「だ。」だけが残らないように */
+  text-autospace: normal;
+  color: rgb(var(--hud-gofun) / 0.68);
+  user-select: text;
+  -webkit-user-select: text;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--hud-gofun) / 0.2) transparent;
+  /* スクロールの上下の端で、文字を切らずに淡く消す */
+  mask-image: linear-gradient(transparent, #000 16px, #000 calc(100% - 24px), transparent);
+}
+
+.hud-notes__body:focus {
+  outline: none;
+}
+
+.hud-notes__body p {
+  margin: 0;
+}
+
+.hud-notes__body p + p {
+  margin-top: 1.25em;
+}
+
+.hud-notes__body .hud-notes__lead {
+  font-size: 14.5px;
+  line-height: 2;
+  color: rgb(var(--hud-gofun) / 0.86);
+}
+
+/* 締めの一文: 本文から離し、上に短い虹色の線 (タイルの ON の線と同じ色) を引く */
+.hud-notes__body .hud-notes__closing {
+  position: relative;
+  margin-top: 40px;
+  padding-top: 24px;
+  font-size: 14px;
+  letter-spacing: 0.16em;
+  color: rgb(var(--hud-gofun) / 0.86);
+}
+
+.hud-notes__closing::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 32px;
+  height: 1px;
+  background: var(--hud-spectrum);
+}
+
+/* 試す: 自分の端末で確かめられる URL とキー */
+.hud-notes__try {
+  margin-top: 40px;
+  padding-top: 16px;
+  border-top: 1px solid var(--hud-faint);
+}
+
+.hud-notes__try h2 {
+  margin: 0 0 12px;
+  font: 400 10px/12px var(--hud-display);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--hud-muted);
+}
+
+.hud-notes__try ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hud-notes__try li {
+  display: grid;
+  grid-template-columns: 112px 1fr;
+  gap: 12px;
+  font-size: 11.5px;
+  line-height: 20px;
+  color: var(--hud-muted);
+}
+
+.hud-notes__try code {
+  font: 400 11px/20px var(--hud-mono);
+  letter-spacing: 0.04em;
+  color: rgb(var(--hud-gofun) / 0.72);
+}
+
+.hud-notes__try a {
+  color: inherit;
+  text-decoration: none;
+  justify-self: start;
+  align-self: start; /* 説明が2行になっても、下線は文字のすぐ下に */
+  border-bottom: 1px solid var(--hud-line);
+  transition: border-color 240ms ease;
+}
+
+.hud-notes__try a:focus-visible {
+  outline: none;
+  border-bottom-color: var(--hud-line-strong);
 }
 
 /* --- キーの案内 (デスクトップだけ) --- */
@@ -863,9 +1113,46 @@
     gap: 6px;
   }
 
-  .hud-camera__mark {
+  .hud-camera__mark,
+  .hud-info__mark {
     width: 16px;
     height: 16px;
+  }
+
+  /* 自動カメラの行 (印 16px) の下に 10px 空ける */
+  .hud-info {
+    top: calc(max(16px, env(safe-area-inset-top)) + 26px);
+    right: max(16px, env(safe-area-inset-right));
+  }
+
+  /* 下からせり上がる板にし、上の時刻・自動カメラ・(i) の行は隠さない */
+  .hud-notes {
+    width: calc(100vw - 24px);
+    margin: auto auto max(12px, env(safe-area-inset-bottom));
+  }
+
+  .hud-notes__panel {
+    --hud-bracket: 12px;
+    max-height: calc(100dvh - max(12px, env(safe-area-inset-bottom)) - max(16px, env(safe-area-inset-top)) - 64px);
+  }
+
+  .hud-notes__head {
+    padding: 8px 8px 0 20px;
+  }
+
+  .hud-notes__body {
+    padding: 4px 20px 24px;
+    font-size: 12.5px;
+    line-height: 2;
+  }
+
+  .hud-notes__body .hud-notes__lead {
+    font-size: 13.5px;
+  }
+
+  .hud-notes__try li {
+    grid-template-columns: 96px 1fr;
+    gap: 8px;
   }
 
   .hud-camera__label {

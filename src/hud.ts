@@ -32,9 +32,18 @@ export interface HudClock {
   phase: 'morning' | 'day' | 'evening' | 'night'
 }
 
+// 右上の (i) で開く技術ノート (文章は notes.ts)
+export interface HudNotes {
+  title: string // 見出し
+  paragraphs: string[] // 本文の段落。最初の段落は少し大きく置く
+  closing: string // 締めの一文。本文から離して置く
+  tries: { code: string; href?: string; text: string }[] // 末尾の「試す」の欄。href があれば、その URL で開き直すリンクにする
+}
+
 export interface HudOptions {
   toggles: HudToggle[] // 前半はスタートボタンの左、後半は右に並ぶ
   camera?: Pick<HudToggle, 'label' | 'get' | 'set'> // 自動カメラ。下の列から離し、右上に小さく置く (C キー)
+  notes?: HudNotes // 技術ノート。自動カメラの下の (i) で開く (I キー、URL の #notes)
   start(): void
   status(): HudStatus | undefined // undefined の間は準備中 (物理の読み込み前) として押せない
   shortcuts?: HudShortcut[]
@@ -121,19 +130,29 @@ const CAMERA_SVG = `
   <circle class="hud-camera__eye" cx="12" cy="16.5" r="1.8"/>
 </svg>`
 
-export function createHud({ toggles, camera, start, status, shortcuts = [], changed = () => {}, ready, clock }: HudOptions) {
+// 技術ノートを開く (i) と、閉じる × (viewBox 24×24 の線画)
+const INFO_SVG = `
+<svg class="hud-info__mark" viewBox="0 0 24 24" aria-hidden="true">
+  <circle cx="12" cy="12" r="9"/>
+  <path d="M12,10.6v6"/>
+  <circle class="hud-info__dot" cx="12" cy="7.6" r="1"/>
+</svg>`
+const CLOSE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6,6 18,18M18,6 6,18"/></svg>`
+
+export function createHud({ toggles, camera, notes, start, status, shortcuts = [], changed = () => {}, ready, clock }: HudOptions) {
   const root = document.createElement('div')
   root.className = 'hud'
   const deck = document.createElement('div')
   deck.className = 'hud-deck'
   root.append(deck)
 
-  const span = (className: string, text = '') => {
-    const element = document.createElement('span')
+  const make = <K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = '') => {
+    const element = document.createElement(tag)
     element.className = className
     element.textContent = text
     return element
   }
+  const span = (className: string, text = '') => make('span', className, text)
 
   // タイルは2段: 見出しと状態の印 / 補足。ON・OFF は印と下端の線(ON で虹色)で表す
   // (狭い画面ではスタートボタンの左右に縦に積むので、左右どちらの何段目かを持たせておく)
@@ -211,6 +230,75 @@ export function createHud({ toggles, camera, start, status, shortcuts = [], chan
     return { button, shown: undefined as boolean | undefined }
   })()
 
+  // 自動カメラの印の真下の (i): 技術ノートを開く。ノートは <dialog> で、開いている間は後ろの作品を触れない。
+  // 開くと URL に #notes を付ける (その URL を共有すると、開いた状態で始まる)
+  const notesView = notes && (() => {
+    const button = make('button', 'hud-info')
+    button.type = 'button'
+    button.title = `${notes.title} (I)`
+    button.setAttribute('aria-label', notes.title)
+    button.innerHTML = INFO_SVG
+
+    const dialog = make('dialog', 'hud-notes')
+    dialog.setAttribute('aria-labelledby', 'hud-notes-title')
+    const title = make('h1', 'hud-notes__title', notes.title)
+    title.id = 'hud-notes-title'
+    const close = make('button', 'hud-notes__close')
+    close.type = 'button'
+    close.setAttribute('aria-label', 'Close')
+    close.innerHTML = CLOSE_SVG
+    close.addEventListener('click', () => dialog.close())
+    const head = make('header', 'hud-notes__head')
+    head.append(title, close)
+
+    // 開いた時は本文にフォーカスを置く (矢印キーと Space でそのままスクロールできる)
+    const body = make('div', 'hud-notes__body')
+    body.tabIndex = -1
+    body.autofocus = true
+    notes.paragraphs.forEach((text, i) => body.append(make('p', i === 0 ? 'hud-notes__lead' : '', text)))
+    body.append(make('p', 'hud-notes__closing', notes.closing))
+    const list = make('ul')
+    for (const { code, href, text } of notes.tries) {
+      const item = make('li')
+      const label = make('code', '', code)
+      if (href) {
+        const link = make('a')
+        link.href = href
+        link.append(label)
+        item.append(link)
+      } else {
+        item.append(label)
+      }
+      item.append(make('span', '', text))
+      list.append(item)
+    }
+    const tries = make('section', 'hud-notes__try')
+    tries.append(make('h2', '', 'Try'), list)
+    body.append(tries)
+
+    const panel = make('div', 'hud-notes__panel')
+    panel.append(head, body)
+    dialog.append(panel)
+
+    const open = () => {
+      if (dialog.open) return
+      dialog.showModal()
+      history.replaceState(null, '', '#notes')
+    }
+    dialog.addEventListener('close', () => {
+      if (location.hash === '#notes') history.replaceState(null, '', location.pathname + location.search)
+    })
+    // 板の外 (暗くした所) を押して離したら閉じる。本文の文字を選んでいて外で離した時は閉じない
+    let pressedOutside = false
+    dialog.addEventListener('pointerdown', (event) => (pressedOutside = event.target === dialog))
+    dialog.addEventListener('click', (event) => {
+      if (pressedOutside && event.target === dialog) dialog.close()
+    })
+    button.addEventListener('click', open)
+    root.append(button, dialog)
+    return { dialog, open }
+  })()
+
   const items = [...toggleViews.slice(0, half).map((view) => view.button), launch, ...toggleViews.slice(half).map((view) => view.button)]
   items.forEach((item, i) => item.style.setProperty('--hud-order', String(i)))
   deck.append(...items)
@@ -219,6 +307,7 @@ export function createHud({ toggles, camera, start, status, shortcuts = [], chan
     [`1–${toggleViews.length}`, 'Toggle'],
     ['Space', 'Start'],
     ...(camera ? [['C', 'Camera']] : []),
+    ...(notes ? [['I', 'Notes']] : []),
     ...shortcuts.map(({ key, label }) => [key.toUpperCase(), label]),
   ]
   const hint = span('hud-hint')
@@ -251,13 +340,22 @@ export function createHud({ toggles, camera, start, status, shortcuts = [], chan
     Promise.all([document.fonts.load('11px Michroma'), document.fonts.load('9px "JetBrains Mono"')]),
     new Promise((resolve) => setTimeout(resolve, 1500)),
   ]).catch(() => {})
-  Promise.all([fonts, ready]).then(() => root.classList.add('is-ready'))
+  Promise.all([fonts, ready]).then(() => {
+    root.classList.add('is-ready')
+    if (location.hash === '#notes') notesView?.open()
+  })
+  addEventListener('hashchange', () => location.hash === '#notes' && notesView?.open())
 
   // lil-gui の入力欄などで打っている文字は拾わない
   addEventListener('keydown', (event) => {
     if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return
     const target = event.target as HTMLElement
     if (target.closest('input, textarea, select, [contenteditable]')) return
+    // ノートを開いている間は作品の操作をしない (Esc で閉じるのは <dialog> が行う)
+    if (notesView?.dialog.open) {
+      if (event.key.toLowerCase() === 'i') notesView.dialog.close()
+      return
+    }
     if (/^[1-9]$/.test(event.key)) {
       const view = toggleViews[Number(event.key) - 1]
       if (view && view.toggle.available !== false) flip(view.toggle)
@@ -268,6 +366,8 @@ export function createHud({ toggles, camera, start, status, shortcuts = [], chan
       fire()
     } else if (camera && event.key.toLowerCase() === 'c') {
       flip(camera)
+    } else if (notesView && event.key.toLowerCase() === 'i') {
+      notesView.open()
     } else {
       shortcuts.find((shortcut) => shortcut.key === event.key.toLowerCase())?.action()
     }

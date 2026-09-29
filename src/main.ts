@@ -15,6 +15,7 @@ import { createStudio } from './studio'
 import type { GemPhysics } from './physics'
 import { createLoader } from './loader'
 import { createHud } from './hud'
+import { NOTES } from './notes'
 import { createGemPoke } from './poke'
 import { createLens } from './lens'
 import { quality } from './quality'
@@ -421,6 +422,7 @@ const hud = createHud({
     { label: 'Caustics', detail: 'Traced light', get: caustics.isEnabled, set: caustics.setEnabled, available: caustics.supported },
   ],
   camera: { label: 'Auto camera', get: () => playback.autoCamera, set: (value) => (playback.autoCamera = value) }, // 右上に離して置く
+  notes: NOTES, // 技術ノート (右上の (i)。文章は notes.ts)
   start: () => physics?.start(), // 最初の姿勢に戻して落とす (何度でもやり直せる)
   changed: () => invalidate(),
   status: () => physics && { running: physics.running, settled: physics.settled },
